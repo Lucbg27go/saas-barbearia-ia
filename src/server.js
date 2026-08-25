@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { getGoogleAuthUrl, handleGoogleCallback } = require('./services/calendarService');
 const { handleCustomerChat } = require('./services/aiAgent');
-const { initWhatsAppClient, getQrCode } = require('./services/whatsappService');
+const { initWhatsAppClient, getQrCode } = require('./services/whatsappClient');
 const { initReminderCron } = require('./services/reminderService');
 const { createClient } = require('@supabase/supabase-js');
 
