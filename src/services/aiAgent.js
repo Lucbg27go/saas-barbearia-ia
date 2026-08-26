@@ -15,14 +15,14 @@ const supabase = createClient(
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Filtra apenas modelos de texto/chat válidos da Groq
+// Função robusta que pega exatamente um modelo de chat disponível na sua chave
 async function getActiveChatModel() {
-  const allowedChatModels = [
+  const preferredTextModels = [
+    'llama3-70b-8192',
+    'llama3-8b-8192',
     'llama-3.3-70b-versatile',
     'llama-3.1-70b-versatile',
-    'llama3-70b-8192',
     'llama-3.1-8b-instant',
-    'llama3-8b-8192',
     'mixtral-8x7b-32768',
     'gemma2-9b-it'
   ];
@@ -30,19 +30,25 @@ async function getActiveChatModel() {
   try {
     const list = await groq.models.list();
     const available = (list.data || []).map(m => m.id);
+    console.log('[Groq] Modelos disponíveis na conta:', available.join(', '));
     
-    // Procura na ordem de preferência pelos modelos de chat
-    for (const model of allowedChatModels) {
+    // Procura na ordem de prioridade
+    for (const model of preferredTextModels) {
       if (available.includes(model)) {
         return model;
       }
     }
+
+    // Se nenhum dos preferidos bater, pega o primeiro que NÃO for whisper/áudio
+    const textOnly = available.filter(id => !id.includes('whisper') && !id.includes('embed'));
+    if (textOnly.length > 0) {
+      return textOnly[0];
+    }
   } catch (err) {
-    console.warn('[Groq Models Warning] Falha ao consultar lista:', err.message);
+    console.warn('[Groq Models Warning] Erro ao listar modelos:', err.message);
   }
 
-  // Fallback seguro de chat
-  return 'llama-3.1-8b-instant';
+  return 'llama3-8b-8192';
 }
 
 const tools = [
@@ -161,12 +167,12 @@ Serviços disponíveis:
 ${servicesList || 'Nenhum serviço cadastrado'}
 
 DIRETRIZES OBRIGATÓRIAS:
-1. Seja educado, prestativo e objetivo.
+1. Seja educado, objetivo e rápido.
 2. Quando o cliente escolher o serviço, dia e horário:
    - Verifique se está dentro do horário e dias de atendimento.
    - Execute IMEDIATAMENTE a ferramenta "bookAppointment" passando a data/hora ISO com offset (-03:00).
    - Ao receber o retorno de sucesso da ferramenta, confirme todos os dados do agendamento para o cliente.
-3. Se o cliente perguntar os horários vagos, chame "checkAvailability".
+3. Se o cliente perguntar horários disponíveis, execute "checkAvailability".
 `;
 
   const messages = [
@@ -175,7 +181,7 @@ DIRETRIZES OBRIGATÓRIAS:
   ];
 
   const selectedModel = await getActiveChatModel();
-  console.log(`[Tenant ${tenantId}] Executando chat com modelo Groq: ${selectedModel}`);
+  console.log(`[Tenant ${tenantId}] Usando modelo Groq: ${selectedModel}`);
 
   let response = await groq.chat.completions.create({
     model: selectedModel,
