@@ -18,40 +18,48 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 // Modelo de chat rápido e compatível
 const GROQ_MODEL = 'openai/gpt-oss-20b';
 
-// Histórico de conversas em memória (chave: tenantId + telefone)
-// Guarda as últimas mensagens para dar contexto à IA
-const conversationHistory = new Map();
 const MAX_HISTORY_MESSAGES = 12; // ~6 pares de pergunta/resposta
-const HISTORY_TTL_MS = 30 * 60 * 1000; // limpa conversas paradas há 30min
+const HISTORY_TTL_MINUTES = 30;  // ignora mensagens mais antigas que isso
 
-function getHistoryKey(tenantId, customerPhone) {
-  return `${tenantId}:${customerPhone}`;
-}
+async function getHistory(tenantId, customerPhone) {
+  const cutoff = new Date(Date.now() - HISTORY_TTL_MINUTES * 60 * 1000).toISOString();
 
-function getHistory(tenantId, customerPhone) {
-  const key = getHistoryKey(tenantId, customerPhone);
-  const entry = conversationHistory.get(key);
-  if (!entry) return [];
-  if (Date.now() - entry.updatedAt > HISTORY_TTL_MS) {
-    conversationHistory.delete(key);
+  const { data, error } = await supabase
+    .from('conversation_history')
+    .select('role, content, created_at')
+    .eq('tenant_id', tenantId)
+    .eq('customer_phone', customerPhone)
+    .gte('created_at', cutoff)
+    .order('created_at', { ascending: false })
+    .limit(MAX_HISTORY_MESSAGES);
+
+  if (error) {
+    console.error('[History Fetch Error]', error);
     return [];
   }
-  return entry.messages;
+
+  // vem em ordem decrescente, precisa inverter pra ordem cronológica
+  return (data || [])
+    .reverse()
+    .map(row => ({ role: row.role, content: row.content }));
 }
 
-function pushHistory(tenantId, customerPhone, role, content) {
-  const key = getHistoryKey(tenantId, customerPhone);
-  const entry = conversationHistory.get(key) || { messages: [], updatedAt: Date.now() };
-  entry.messages.push({ role, content });
-  if (entry.messages.length > MAX_HISTORY_MESSAGES) {
-    entry.messages = entry.messages.slice(-MAX_HISTORY_MESSAGES);
-  }
-  entry.updatedAt = Date.now();
-  conversationHistory.set(key, entry);
+async function pushHistory(tenantId, customerPhone, role, content) {
+  const { error } = await supabase
+    .from('conversation_history')
+    .insert({ tenant_id: tenantId, customer_phone: customerPhone, role, content });
+
+  if (error) console.error('[History Insert Error]', error);
 }
 
-function clearHistory(tenantId, customerPhone) {
-  conversationHistory.delete(getHistoryKey(tenantId, customerPhone));
+async function clearHistory(tenantId, customerPhone) {
+  const { error } = await supabase
+    .from('conversation_history')
+    .delete()
+    .eq('tenant_id', tenantId)
+    .eq('customer_phone', customerPhone);
+
+  if (error) console.error('[History Clear Error]', error);
 }
 
 async function handleCustomerChat(tenantId, customerPhone, customerName, incomingMessage) {
@@ -132,7 +140,7 @@ COMO DECIDIR A ACTION:
 - Não agende em horários fora do expediente ou durante o almoço.
 `;
 
-    const history = getHistory(tenantId, customerPhone);
+    const history = await getHistory(tenantId, customerPhone);
 
     const chatCompletion = await groq.chat.completions.create({
       model: GROQ_MODEL,
@@ -153,8 +161,8 @@ COMO DECIDIR A ACTION:
     }
 
     // Salva a troca no histórico (mensagem do cliente + resposta da IA)
-    pushHistory(tenantId, customerPhone, 'user', incomingMessage);
-    pushHistory(tenantId, customerPhone, 'assistant', parsed.replyMessage || rawResponse);
+    await pushHistory(tenantId, customerPhone, 'user', incomingMessage);
+    await pushHistory(tenantId, customerPhone, 'assistant', parsed.replyMessage || rawResponse);
 
     // Se a IA decidiu agendar
     if (parsed.action === 'book' && parsed.bookingData) {
@@ -167,7 +175,7 @@ COMO DECIDIR A ACTION:
           durationMinutes: parsed.bookingData.durationMinutes || 30
         });
         // Agendamento concluído: limpa o histórico pra próxima conversa começar do zero
-        clearHistory(tenantId, customerPhone);
+        await clearHistory(tenantId, customerPhone);
       } catch (bookErr) {
         console.error('[Calendar Booking Error]', bookErr);
       }
