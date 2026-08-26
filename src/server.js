@@ -4,7 +4,6 @@ const cors = require('cors');
 const QRCode = require('qrcode');
 const { createClient } = require('@supabase/supabase-js');
 
-// Supabase Client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -14,36 +13,27 @@ const supabase = createClient(
   }
 );
 
-// Importações dos serviços
 const { getOrInitWhatsApp, getWhatsAppStatus } = require('./services/whatsappClient');
 const { getGoogleAuthUrl, handleGoogleCallback } = require('./services/calendarService');
-const { initReminderCron } = require('./services/reminderService') || {};
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }));
 app.use(express.json());
 
-// Health Check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// --- ROTAS DO GOOGLE CALENDAR ---
+// --- GOOGLE CALENDAR ---
 app.get(['/auth/google', '/api/auth/google'], (req, res) => {
   try {
     const tenantId = req.query.tenantId || req.query.tenant_id;
     if (!tenantId) return res.status(400).send('Tenant ID é obrigatório.');
-    const authUrl = getGoogleAuthUrl(tenantId);
-    res.redirect(authUrl);
+    res.redirect(getGoogleAuthUrl(tenantId));
   } catch (error) {
-    console.error('[Google Auth Error]', error);
-    res.status(500).send('Erro ao gerar URL do Google: ' + error.message);
+    res.status(500).send('Erro Google Auth: ' + error.message);
   }
 });
 
@@ -54,69 +44,53 @@ app.get(['/auth/google/callback', '/api/auth/google/callback'], async (req, res)
     await handleGoogleCallback(code, state);
     res.redirect(`https://barberai-web.vercel.app?google=connected&tenantId=${state}`);
   } catch (error) {
-    console.error('[Google Callback Error]', error);
-    res.status(500).send('Falha ao autenticar com o Google.');
+    res.status(500).send('Falha ao autenticar com Google.');
   }
 });
 
-// --- ROTAS DO WHATSAPP (COM CONVERSÃO PARA BASE64) ---
+// --- WHATSAPP QR CODE ---
 app.get(['/api/whatsapp/qrcode/:tenantId', '/whatsapp/qrcode/:tenantId'], async (req, res) => {
   try {
     const { tenantId } = req.params;
     let session = await getOrInitWhatsApp(tenantId);
 
     let attempts = 0;
-    while (session && !session.qrcode && session.status !== 'connected' && attempts < 12) {
+    while (session && !session.qrcode && session.status !== 'connected' && attempts < 10) {
       await new Promise((r) => setTimeout(r, 500));
       session = getWhatsAppStatus(tenantId);
       attempts++;
     }
 
-    const currentStatus = session?.status || 'connecting';
     let qrDataUrl = null;
-
     if (session?.qrcode) {
-      // Converte a string de autenticação em imagem PNG Base64
-      qrDataUrl = await QRCode.toDataURL(session.qrcode, {
-        margin: 2,
-        width: 300,
-        color: {
-          dark: '#000000',
-          light: '#ffffff'
-        }
-      });
+      qrDataUrl = await QRCode.toDataURL(session.qrcode, { margin: 2, width: 300 });
     }
 
     res.json({
-      status: currentStatus,
+      status: session?.status || 'connecting',
       qrcode: qrDataUrl,
       qr: qrDataUrl
     });
   } catch (error) {
-    console.error('[WhatsApp QRCode Error]', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 app.get(['/api/whatsapp/status/:tenantId', '/whatsapp/status/:tenantId'], (req, res) => {
-  const { tenantId } = req.params;
-  const statusData = getWhatsAppStatus(tenantId);
-  res.json(statusData);
+  res.json(getWhatsAppStatus(req.params.tenantId));
 });
 
-// --- ROTAS DE SERVIÇOS ---
+// --- SERVIÇOS ---
 app.get(['/api/services/:tenantId', '/api/services'], async (req, res) => {
   try {
     const tenantId = req.params.tenantId || req.query.tenantId || req.query.tenant_id;
-    let query = supabase.from('services').select('*').order('created_at', { ascending: true });
-    if (tenantId) query = query.eq('tenant_id', tenantId);
-    
-    const { data, error } = await query;
+    let q = supabase.from('services').select('*').order('created_at', { ascending: true });
+    if (tenantId) q = q.eq('tenant_id', tenantId);
+    const { data, error } = await q;
     if (error) throw error;
     res.json(data || []);
-  } catch (error) {
-    console.error('[Get Services Error]', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -124,64 +98,52 @@ app.post(['/api/services', '/api/services/:tenantId'], async (req, res) => {
   try {
     const tenantId = req.params.tenantId || req.body.tenant_id || req.body.tenantId;
     const { name, price, duration_minutes, duration } = req.body;
-
-    const { data, error } = await supabase.from('services').insert([
-      {
-        tenant_id: tenantId,
-        name: name,
-        price: parseFloat(price),
-        duration_minutes: parseInt(duration_minutes || duration, 10) || 30
-      }
-    ]).select().single();
-
+    const { data, error } = await supabase.from('services').insert([{
+      tenant_id: tenantId,
+      name,
+      price: parseFloat(price),
+      duration_minutes: parseInt(duration_minutes || duration, 10) || 30
+    }]).select().single();
     if (error) throw error;
     res.status(201).json(data);
-  } catch (error) {
-    console.error('[Create Service Error]', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.delete(['/api/services/:id', '/api/services/:tenantId/:id'], async (req, res) => {
   try {
-    const id = req.params.id;
-    const { error } = await supabase.from('services').delete().eq('id', id);
+    const { error } = await supabase.from('services').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
-  } catch (error) {
-    console.error('[Delete Service Error]', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --- ROTAS DE AGENDAMENTOS ---
+// --- AGENDAMENTOS ---
 app.get(['/api/appointments/:tenantId', '/api/appointments'], async (req, res) => {
   try {
     const tenantId = req.params.tenantId || req.query.tenantId || req.query.tenant_id;
-    let query = supabase.from('appointments').select('*').order('start_time', { ascending: false });
-    if (tenantId) query = query.eq('tenant_id', tenantId);
-
-    const { data, error } = await query;
+    let q = supabase.from('appointments').select('*').order('start_time', { ascending: false });
+    if (tenantId) q = q.eq('tenant_id', tenantId);
+    const { data, error } = await q;
     if (error) throw error;
     res.json(data || []);
-  } catch (error) {
-    console.error('[Get Appointments Error]', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --- ROTAS DE CONFIGURAÇÕES DE HORÁRIO ---
+// --- CONFIGURAÇÕES DE HORÁRIO ---
 app.get(['/api/settings/:tenantId', '/api/settings'], async (req, res) => {
   try {
     const tenantId = req.params.tenantId || req.query.tenantId || req.query.tenant_id;
-    if (!tenantId) return res.json({});
-
     const { data, error } = await supabase.from('tenants').select('*').eq('id', tenantId).single();
     if (error) throw error;
     res.json(data || {});
-  } catch (error) {
-    console.error('[Get Settings Error]', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -201,19 +163,10 @@ app.post(['/api/settings', '/api/settings/:tenantId'], async (req, res) => {
 
     if (error) throw error;
     res.json(data);
-  } catch (error) {
-    console.error('[Save Settings Error]', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
-
-if (typeof initReminderCron === 'function') {
-  try {
-    initReminderCron();
-  } catch (err) {
-    console.warn('[Cron Warning]', err.message);
-  }
-}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Servidor rodando com sucesso na porta ${PORT}`);
