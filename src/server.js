@@ -2,14 +2,17 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-// Importações corretas dos arquivos existentes
-const { initTenantSession, sessions } = require('./services/whatsappClient');
-const { initReminderCron } = require('./services/reminderService');
+const { getOrInitWhatsApp, getWhatsAppStatus } = require('./services/whatsappClient');
+const { initReminderCron } = require('./services/reminderService') || {};
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 // Health Check
@@ -17,81 +20,51 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// Helper para buscar sessão de Map ou Objeto
-function getSessionData(tenantId) {
-  if (!sessions) return null;
-  if (typeof sessions.get === 'function') {
-    return sessions.get(tenantId);
-  }
-  return sessions[tenantId] || null;
-}
-
-// Rota do QR Code (chamada pelo Frontend)
-app.get('/api/whatsapp/qrcode/:tenantId', async (req, res) => {
+// Rota do QR Code consumida pelo Frontend
+app.get(['/api/whatsapp/qrcode/:tenantId', '/whatsapp/qrcode/:tenantId'], async (req, res) => {
   try {
     const { tenantId } = req.params;
-    let session = getSessionData(tenantId);
+    let session = await getOrInitWhatsApp(tenantId);
 
-    if (!session && typeof initTenantSession === 'function') {
-      session = await initTenantSession(tenantId);
+    // Aguarda até o evento 'qr' preencher o qrcode base64
+    let attempts = 0;
+    while (session && !session.qrcode && session.status !== 'connected' && attempts < 10) {
+      await new Promise((r) => setTimeout(r, 500));
+      session = getWhatsAppStatus(tenantId);
+      attempts++;
     }
 
-    const qrData = session?.qrCodeDataUrl || session?.qr || session?.qrcode || null;
-    const currentStatus = session?.status || (qrData ? 'qr_ready' : 'initializing');
+    const currentStatus = session?.status || 'connecting';
+    const qrcode = session?.qrcode || null;
 
     res.json({
       status: currentStatus,
-      qrcode: qrData,
-      qr: qrData
+      qrcode: qrcode,
+      qr: qrcode
     });
   } catch (error) {
-    console.error('[WhatsApp QRCode Error]', error);
+    console.error('[WhatsApp QRCode Route Error]', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Rota para inicializar sessão
-app.post('/api/whatsapp/init', async (req, res) => {
-  try {
-    const tenant_id = req.body.tenant_id || req.body.tenantId;
-    if (!tenant_id) return res.status(400).json({ error: 'tenant_id é obrigatório.' });
-
-    let session = null;
-    if (typeof initTenantSession === 'function') {
-      session = await initTenantSession(tenant_id);
-    }
-
-    const qrData = session?.qrCodeDataUrl || session?.qr || session?.qrcode || null;
-    res.json({ status: 'initialized', qr: qrData });
-  } catch (error) {
-    console.error('[WhatsApp Init Error]', error);
-    res.status(500).json({ error: error.message });
-  }
+// Rota de status do WhatsApp
+app.get(['/api/whatsapp/status/:tenantId', '/whatsapp/status/:tenantId'], (req, res) => {
+  const { tenantId } = req.params;
+  const statusData = getWhatsAppStatus(tenantId);
+  res.json(statusData);
 });
 
-// Rota de status da sessão
-app.get('/api/whatsapp/status/:tenant_id', (req, res) => {
-  const tenant_id = req.params.tenant_id || req.params.tenantId;
-  const session = getSessionData(tenant_id);
+// Fallback de rotas do painel
+app.get(['/api/services/:tenantId', '/api/services'], (req, res) => res.json([]));
+app.get(['/api/appointments/:tenantId', '/api/appointments'], (req, res) => res.json([]));
+app.get(['/api/settings/:tenantId', '/api/settings'], (req, res) => res.json({}));
 
-  if (!session) {
-    return res.json({ status: 'disconnected', qr: null, qrcode: null });
-  }
-
-  const qrData = session.qrCodeDataUrl || session.qr || session.qrcode || null;
-  res.json({
-    status: session.status || 'connected',
-    qr: qrData,
-    qrcode: qrData
-  });
-});
-
-// Inicialização de lembretes se existir a função
 if (typeof initReminderCron === 'function') {
   try {
     initReminderCron();
-  } catch (cronErr) {
-    console.warn('[Cron Warning]', cronErr.message);
+  } catch (err) {
+    console.warn('[Cron Warning]', err.message);
   }
 }
 
