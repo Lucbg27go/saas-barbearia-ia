@@ -15,6 +15,9 @@ const supabase = createClient(
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+// Modelo padrão com suporte total a ferramentas na Groq
+const GROQ_MODEL = 'llama-3.1-70b-versatile';
+
 const tools = [
   {
     type: 'function',
@@ -26,7 +29,7 @@ const tools = [
         properties: {
           date: {
             type: 'string',
-            description: 'A data no formato YYYY-MM-DD para verificar horários ocupados.',
+            description: 'Data no formato YYYY-MM-DD para consultar disponibilidade.',
           },
         },
         required: ['date'],
@@ -42,8 +45,8 @@ const tools = [
         type: 'object',
         properties: {
           serviceName: { type: 'string', description: 'Nome do serviço escolhido.' },
-          startTime: { type: 'string', description: 'Data/Hora de início no formato ISO (YYYY-MM-DDTHH:mm:ss-03:00).' },
-          durationMinutes: { type: 'number', description: 'Duração em minutos do serviço.' },
+          startTime: { type: 'string', description: 'Data/Hora de início no formato ISO (ex: 2026-08-27T10:00:00-03:00).' },
+          durationMinutes: { type: 'number', description: 'Duração em minutos.' },
           customerName: { type: 'string', description: 'Nome do cliente.' },
           customerPhone: { type: 'string', description: 'Telefone do cliente.' },
         },
@@ -59,7 +62,7 @@ const tools = [
       parameters: {
         type: 'object',
         properties: {
-          customerPhone: { type: 'string', description: 'Telefone do cliente que deseja cancelar.' },
+          customerPhone: { type: 'string', description: 'Telefone do cliente.' },
         },
         required: ['customerPhone'],
       },
@@ -69,12 +72,12 @@ const tools = [
     type: 'function',
     function: {
       name: 'rescheduleAppointment',
-      description: 'Altera o dia ou horário de um agendamento já existente do cliente.',
+      description: 'Remarca um horário já existente do cliente.',
       parameters: {
         type: 'object',
         properties: {
           customerPhone: { type: 'string', description: 'Telefone do cliente.' },
-          newStartTime: { type: 'string', description: 'Novo horário de início no formato ISO (YYYY-MM-DDTHH:mm:ss-03:00).' },
+          newStartTime: { type: 'string', description: 'Novo horário ISO (ex: 2026-08-27T14:00:00-03:00).' },
         },
         required: ['customerPhone', 'newStartTime'],
       },
@@ -83,7 +86,7 @@ const tools = [
 ];
 
 async function handleCustomerChat(tenantId, customerPhone, customerName, incomingMessage) {
-  // 1. Verifica status da assinatura do Tenant
+  // 1. Verifica status do tenant
   const { data: tenant } = await supabase
     .from('tenants')
     .select('*')
@@ -91,10 +94,8 @@ async function handleCustomerChat(tenantId, customerPhone, customerName, incomin
     .single();
 
   const isTrialExpired = tenant?.trial_ends_at && new Date(tenant.trial_ends_at) < new Date();
-  const isInactive = tenant?.subscription_status !== 'active' && isTrialExpired;
-
-  if (isInactive) {
-    return "Olá! Nosso canal de agendamento automático está temporariamente em manutenção. Por favor, entre em contato diretamente com a barbearia pelo telefone principal.";
+  if (tenant?.subscription_status !== 'active' && isTrialExpired) {
+    return "Olá! Nosso canal de agendamento automático está temporariamente em manutenção. Por favor, entre em contato diretamente com a barbearia.";
   }
 
   // 2. Busca os serviços cadastrados
@@ -104,39 +105,42 @@ async function handleCustomerChat(tenantId, customerPhone, customerName, incomin
     .eq('tenant_id', tenantId);
 
   const servicesList = (services || [])
-    .map(s => `- ${s.name}: R$ ${s.price} (${s.duration_minutes || 30} min)`)
+    .map(s => `- ${s.name}: R$ ${parseFloat(s.price).toFixed(2)} (${s.duration_minutes || 30} min)`)
     .join('\n');
 
-  // Configurações de funcionamento da tabela tenants
+  // Configurações de horários e escala
   const openTime = tenant?.open_time || '09:00';
   const closeTime = tenant?.close_time || '19:00';
   const lunchStart = tenant?.lunch_start || '12:00';
   const lunchEnd = tenant?.lunch_end || '13:00';
-  const workDays = Array.isArray(tenant?.work_days) 
-    ? tenant.work_days.join(', ') 
-    : 'seg, ter, qua, qui, sex, sab';
+  const workDays = Array.isArray(tenant?.work_days)
+    ? tenant.work_days.join(', ')
+    : 'seg, ter, qua, qui, sex, sab, dom';
 
-  const nowIso = new Date().toISOString();
+  // Data atual em horário de Brasília (UTC-3)
+  const brasiliaDate = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+  const formattedToday = brasiliaDate.toISOString().split('T')[0];
+  const nowIso = brasiliaDate.toISOString();
 
   const systemInstruction = `
-Você é o atendente virtual inteligente da barbearia.
-Data e hora atual de referência: ${nowIso} (Fuso horário de Brasília -03:00).
+Você é a atendente virtual inteligente da barbearia.
+Hoje é: ${formattedToday} | Horário atual: ${nowIso} (Horário de Brasília -03:00).
 
 REGRAS DE FUNCIONAMENTO:
-- Dias de atendimento: ${workDays}
-- Horário de abertura: ${openTime} | Horário de fechamento: ${closeTime}
-- Intervalo de almoço / pausa: das ${lunchStart} às ${lunchEnd} (não agendar nesse período)
+- Dias de funcionamento: ${workDays}
+- Horário de atendimento: das ${openTime} às ${closeTime}
+- Intervalo de almoço: das ${lunchStart} às ${lunchEnd} (NÃO agendar nesse intervalo)
 
-Serviços disponíveis e preços:
-${servicesList}
+Serviços disponíveis:
+${servicesList || 'Nenhum serviço cadastrado'}
 
-Diretrizes de Atendimento:
-- Seja simpático, prestativo e direto.
-- Respeite rigorosamente o horário de funcionamento e intervalo de almoço.
-- Para verificar horários ocupados em uma data, execute a ferramenta "checkAvailability".
-- Quando o cliente definir o serviço, dia e horário, execute IMEDIATAMENTE a ferramenta "bookAppointment" e confirme o agendamento na resposta.
-- Para cancelar horários, execute "cancelAppointment".
-- Para remarcar, execute "rescheduleAppointment".
+DIRETRIZES OBRIGATÓRIAS:
+1. Seja educado, objetivo e rápido.
+2. Quando o cliente disser a data/hora e o serviço (ex: "amanhã às 10h degradê"):
+   - Verifique se o dia/horário está dentro do funcionamento.
+   - Execute IMEDIATAMENTE a ferramenta "bookAppointment" passando a data no formato ISO com offset (-03:00).
+   - Assim que a ferramenta retornar sucesso, responda confirmando o corte, serviço, dia, horário e valor.
+3. Se o cliente perguntar horários disponíveis, chame "checkAvailability".
 `;
 
   const messages = [
@@ -144,28 +148,47 @@ Diretrizes de Atendimento:
     { role: 'user', content: `[Cliente: ${customerName} | Telefone: ${customerPhone}]\nMensagem: ${incomingMessage}` },
   ];
 
-  // Modelo Groq Llama 3.3 70B
-  let response = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    messages,
-    tools,
-    tool_choice: 'auto',
-  });
+  async function getGroqCompletion(chatMessages) {
+    try {
+      return await groq.chat.completions.create({
+        model: GROQ_MODEL,
+        messages: chatMessages,
+        tools,
+        tool_choice: 'auto',
+      });
+    } catch (err) {
+      // Fallback para o modelo Llama 3.1 8B caso a cota do 70B seja atingida
+      return await groq.chat.completions.create({
+        model: 'llama-3.1-8b-instant',
+        messages: chatMessages,
+        tools,
+        tool_choice: 'auto',
+      });
+    }
+  }
 
+  let response = await getGroqCompletion(messages);
   let responseMessage = response.choices[0].message;
 
+  // Processamento de Function Calling
   while (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
     messages.push(responseMessage);
 
     for (const toolCall of responseMessage.tool_calls) {
       const functionName = toolCall.function.name;
-      const args = JSON.parse(toolCall.function.arguments);
+      let args = {};
+      try {
+        args = JSON.parse(toolCall.function.arguments);
+      } catch (e) {
+        args = {};
+      }
+
       let functionResponseData = {};
 
       try {
         if (functionName === 'checkAvailability') {
           const { date } = args;
-          const busySlots = await listBusySlots(tenantId, date);
+          const busySlots = await listBusySlots(tenantId, date || formattedToday);
           functionResponseData = { busySlots, dateChecked: date };
         } else if (functionName === 'bookAppointment') {
           const { serviceName, startTime, durationMinutes, customerName: cName, customerPhone: cPhone } = args;
@@ -174,7 +197,7 @@ Diretrizes de Atendimento:
             customerPhone: cPhone || customerPhone,
             serviceName,
             startTime,
-            durationMinutes,
+            durationMinutes: durationMinutes || 30,
           });
           functionResponseData = { success: true, eventId: event?.id || 'ok', start: startTime };
         } else if (functionName === 'cancelAppointment') {
@@ -189,7 +212,7 @@ Diretrizes de Atendimento:
           functionResponseData = resReschedule;
         }
       } catch (err) {
-        console.error(`Erro ao executar ferramenta ${functionName}:`, err);
+        console.error(`[Tool Error ${functionName}]`, err);
         functionResponseData = { error: err.message };
       }
 
@@ -200,20 +223,13 @@ Diretrizes de Atendimento:
       });
     }
 
-    response = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages,
-      tools,
-      tool_choice: 'auto',
-    });
-
+    response = await getGroqCompletion(messages);
     responseMessage = response.choices[0].message;
   }
 
   return responseMessage.content;
 }
 
-// Exporta tanto processUserMessage quanto handleCustomerChat para compatibilidade total
 module.exports = {
   processUserMessage: handleCustomerChat,
   handleCustomerChat,
