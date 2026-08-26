@@ -1,40 +1,56 @@
-const cron = require('node-cron');
-const { createClient } = require('@supabase/supabase-js');
-const { sessions } = require('./whatsappClient');
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { auth: { persistSession: false } }
-);
+// Importações com os caminhos corretos dentro de /services
+const { initTenantSession, sessions } = require('./services/whatsappClient');
+const { initReminderCron } = require('./services/reminderService');
 
-function initReminderCron() {
-  cron.schedule('* * * * *', async () => {
-    const now = new Date();
-    const inTwoHours = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-    const { data: appointments } = await supabase
-      .from('appointments')
-      .select('*, services(*)')
-      .eq('reminder_sent', false)
-      .lte('start_time', inTwoHours.toISOString())
-      .gt('start_time', now.toISOString());
+app.use(cors());
+app.use(express.json());
 
-    if (!appointments || appointments.length === 0) return;
+// Rota de Health Check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
 
-    for (const appt of appointments) {
-      const session = sessions.get(appt.tenant_id);
-      if (session && session.status === 'connected') {
-        const msg = `Olá! Lembramos do seu agendamento hoje às ${new Date(appt.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`;
-        try {
-          await session.client.sendMessage(appt.customer_phone, msg);
-          await supabase.from('appointments').update({ reminder_sent: true }).eq('id', appt.id);
-        } catch (err) {
-          console.error('[Reminder Error]', err);
-        }
-      }
+// Rota para inicializar a sessão do WhatsApp de um tenant
+app.post('/api/whatsapp/init', async (req, res) => {
+  try {
+    const { tenant_id } = req.body;
+    if (!tenant_id) {
+      return res.status(400).json({ error: 'tenant_id é obrigatório.' });
     }
-  });
-}
 
-module.exports = { initReminderCron };
+    const session = await initTenantSession(tenant_id);
+    res.json({ status: 'initialized', qr: session.qr || null });
+  } catch (error) {
+    console.error('[WhatsApp Init Error]', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rota para consultar o status da sessão
+app.get('/api/whatsapp/status/:tenant_id', (req, res) => {
+  const { tenant_id } = req.params;
+  const session = sessions.get(tenant_id);
+
+  if (!session) {
+    return res.json({ status: 'disconnected', qr: null });
+  }
+
+  res.json({
+    status: session.status,
+    qr: session.qr || null
+  });
+});
+
+// Inicializa a rotina de lembretes automáticos
+initReminderCron();
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Server] Servidor rodando com sucesso na porta ${PORT}`);
+});
