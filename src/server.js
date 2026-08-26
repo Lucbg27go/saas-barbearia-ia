@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const QRCode = require('qrcode');
 const { createClient } = require('@supabase/supabase-js');
 
 // Supabase Client
@@ -37,9 +38,7 @@ app.get('/health', (req, res) => {
 app.get(['/auth/google', '/api/auth/google'], (req, res) => {
   try {
     const tenantId = req.query.tenantId || req.query.tenant_id;
-    if (!tenantId) {
-      return res.status(400).send('Tenant ID é obrigatório.');
-    }
+    if (!tenantId) return res.status(400).send('Tenant ID é obrigatório.');
     const authUrl = getGoogleAuthUrl(tenantId);
     res.redirect(authUrl);
   } catch (error) {
@@ -60,26 +59,38 @@ app.get(['/auth/google/callback', '/api/auth/google/callback'], async (req, res)
   }
 });
 
-// --- ROTAS DO WHATSAPP ---
+// --- ROTAS DO WHATSAPP (COM CONVERSÃO PARA BASE64) ---
 app.get(['/api/whatsapp/qrcode/:tenantId', '/whatsapp/qrcode/:tenantId'], async (req, res) => {
   try {
     const { tenantId } = req.params;
     let session = await getOrInitWhatsApp(tenantId);
 
     let attempts = 0;
-    while (session && !session.qrcode && session.status !== 'connected' && attempts < 10) {
+    while (session && !session.qrcode && session.status !== 'connected' && attempts < 12) {
       await new Promise((r) => setTimeout(r, 500));
       session = getWhatsAppStatus(tenantId);
       attempts++;
     }
 
     const currentStatus = session?.status || 'connecting';
-    const qrcode = session?.qrcode || null;
+    let qrDataUrl = null;
+
+    if (session?.qrcode) {
+      // Converte a string de autenticação em imagem PNG Base64
+      qrDataUrl = await QRCode.toDataURL(session.qrcode, {
+        margin: 2,
+        width: 300,
+        color: {
+          dark: '#000000',
+          light: '#ffffff'
+        }
+      });
+    }
 
     res.json({
       status: currentStatus,
-      qrcode: qrcode,
-      qr: qrcode
+      qrcode: qrDataUrl,
+      qr: qrDataUrl
     });
   } catch (error) {
     console.error('[WhatsApp QRCode Error]', error);
@@ -93,7 +104,7 @@ app.get(['/api/whatsapp/status/:tenantId', '/whatsapp/status/:tenantId'], (req, 
   res.json(statusData);
 });
 
-// --- ROTAS DE SERVIÇOS (TABELA DE SERVIÇOS) ---
+// --- ROTAS DE SERVIÇOS ---
 app.get(['/api/services/:tenantId', '/api/services'], async (req, res) => {
   try {
     const tenantId = req.params.tenantId || req.query.tenantId || req.query.tenant_id;
@@ -143,7 +154,7 @@ app.delete(['/api/services/:id', '/api/services/:tenantId/:id'], async (req, res
   }
 });
 
-// --- ROTAS DE AGENDAMENTOS (DASHBOARD) ---
+// --- ROTAS DE AGENDAMENTOS ---
 app.get(['/api/appointments/:tenantId', '/api/appointments'], async (req, res) => {
   try {
     const tenantId = req.params.tenantId || req.query.tenantId || req.query.tenant_id;
@@ -196,7 +207,6 @@ app.post(['/api/settings', '/api/settings/:tenantId'], async (req, res) => {
   }
 });
 
-// Inicialização do cron de lembretes
 if (typeof initReminderCron === 'function') {
   try {
     initReminderCron();
