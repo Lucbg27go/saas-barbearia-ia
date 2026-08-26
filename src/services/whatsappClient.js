@@ -1,7 +1,6 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const { processUserMessage } = require('./aiAgent');
 
-// Armazena as instâncias em memória por tenant
 const sessions = new Map();
 
 async function getOrInitWhatsApp(tenantId) {
@@ -58,7 +57,7 @@ async function getOrInitWhatsApp(tenantId) {
   });
 
   client.on('authenticated', () => {
-    console.log(`🔑 [Tenant ${tenantId}] Autenticado com sucesso.`);
+    console.log(`🔑 [Tenant ${tenantId}] Autenticado.`);
     sessionState.status = 'authenticated';
   });
 
@@ -74,7 +73,6 @@ async function getOrInitWhatsApp(tenantId) {
     sessions.delete(tenantId);
   });
 
-  // Processamento de Mensagens
   client.on('message', async (msg) => {
     try {
       if (msg.from.includes('@g.us') || msg.isStatus || msg.fromMe) return;
