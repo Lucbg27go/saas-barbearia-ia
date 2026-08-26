@@ -15,8 +15,38 @@ const supabase = createClient(
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Modelo padrão com suporte total a ferramentas na Groq
-const GROQ_MODEL = 'llama-3.1-70b-versatile';
+// Função para obter dinamicamente um modelo funcional na sua conta da Groq
+async function getActiveGroqModel() {
+  try {
+    const list = await groq.models.list();
+    const availableIds = (list.data || []).map(m => m.id);
+    
+    // Lista de preferência por ordem de inteligência e suporte a ferramentas
+    const preferredModels = [
+      'llama-3.3-70b-versatile',
+      'llama3-70b-8192',
+      'llama-3.1-70b-versatile',
+      'llama-3.1-8b-instant',
+      'llama3-8b-8192',
+      'mixtral-8x7b-32768',
+      'gemma2-9b-it'
+    ];
+
+    for (const model of preferredModels) {
+      if (availableIds.includes(model)) {
+        return model;
+      }
+    }
+    
+    // Se nenhum dos preferidos for encontrado, usa o primeiro modelo da lista
+    if (availableIds.length > 0) {
+      return availableIds[0];
+    }
+  } catch (err) {
+    console.warn('[Groq Models Warning] Não foi possível listar modelos:', err.message);
+  }
+  return 'llama3-8b-8192';
+}
 
 const tools = [
   {
@@ -117,19 +147,18 @@ async function handleCustomerChat(tenantId, customerPhone, customerName, incomin
     ? tenant.work_days.join(', ')
     : 'seg, ter, qua, qui, sex, sab, dom';
 
-  // Data atual em horário de Brasília (UTC-3)
   const brasiliaDate = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
   const formattedToday = brasiliaDate.toISOString().split('T')[0];
   const nowIso = brasiliaDate.toISOString();
 
   const systemInstruction = `
 Você é a atendente virtual inteligente da barbearia.
-Hoje é: ${formattedToday} | Horário atual: ${nowIso} (Horário de Brasília -03:00).
+Hoje é: ${formattedToday} | Horário atual de referência: ${nowIso} (Horário de Brasília -03:00).
 
 REGRAS DE FUNCIONAMENTO:
 - Dias de funcionamento: ${workDays}
 - Horário de atendimento: das ${openTime} às ${closeTime}
-- Intervalo de almoço: das ${lunchStart} às ${lunchEnd} (NÃO agendar nesse intervalo)
+- Intervalo de almoço: das ${lunchStart} às ${lunchEnd} (NÃO agendar nesse período)
 
 Serviços disponíveis:
 ${servicesList || 'Nenhum serviço cadastrado'}
@@ -139,7 +168,7 @@ DIRETRIZES OBRIGATÓRIAS:
 2. Quando o cliente disser a data/hora e o serviço (ex: "amanhã às 10h degradê"):
    - Verifique se o dia/horário está dentro do funcionamento.
    - Execute IMEDIATAMENTE a ferramenta "bookAppointment" passando a data no formato ISO com offset (-03:00).
-   - Assim que a ferramenta retornar sucesso, responda confirmando o corte, serviço, dia, horário e valor.
+   - Assim que a ferramenta retornar sucesso, confirme o corte, serviço, data, horário e valor.
 3. Se o cliente perguntar horários disponíveis, chame "checkAvailability".
 `;
 
@@ -148,26 +177,16 @@ DIRETRIZES OBRIGATÓRIAS:
     { role: 'user', content: `[Cliente: ${customerName} | Telefone: ${customerPhone}]\nMensagem: ${incomingMessage}` },
   ];
 
-  async function getGroqCompletion(chatMessages) {
-    try {
-      return await groq.chat.completions.create({
-        model: GROQ_MODEL,
-        messages: chatMessages,
-        tools,
-        tool_choice: 'auto',
-      });
-    } catch (err) {
-      // Fallback para o modelo Llama 3.1 8B caso a cota do 70B seja atingida
-      return await groq.chat.completions.create({
-        model: 'llama-3.1-8b-instant',
-        messages: chatMessages,
-        tools,
-        tool_choice: 'auto',
-      });
-    }
-  }
+  const selectedModel = await getActiveGroqModel();
+  console.log(`[Tenant ${tenantId}] Usando modelo Groq: ${selectedModel}`);
 
-  let response = await getGroqCompletion(messages);
+  let response = await groq.chat.completions.create({
+    model: selectedModel,
+    messages,
+    tools,
+    tool_choice: 'auto',
+  });
+
   let responseMessage = response.choices[0].message;
 
   // Processamento de Function Calling
@@ -223,7 +242,13 @@ DIRETRIZES OBRIGATÓRIAS:
       });
     }
 
-    response = await getGroqCompletion(messages);
+    response = await groq.chat.completions.create({
+      model: selectedModel,
+      messages,
+      tools,
+      tool_choice: 'auto',
+    });
+
     responseMessage = response.choices[0].message;
   }
 
