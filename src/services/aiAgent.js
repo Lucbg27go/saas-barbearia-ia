@@ -15,37 +15,34 @@ const supabase = createClient(
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Função para obter dinamicamente um modelo funcional na sua conta da Groq
-async function getActiveGroqModel() {
+// Filtra apenas modelos de texto/chat válidos da Groq
+async function getActiveChatModel() {
+  const allowedChatModels = [
+    'llama-3.3-70b-versatile',
+    'llama-3.1-70b-versatile',
+    'llama3-70b-8192',
+    'llama-3.1-8b-instant',
+    'llama3-8b-8192',
+    'mixtral-8x7b-32768',
+    'gemma2-9b-it'
+  ];
+
   try {
     const list = await groq.models.list();
-    const availableIds = (list.data || []).map(m => m.id);
+    const available = (list.data || []).map(m => m.id);
     
-    // Lista de preferência por ordem de inteligência e suporte a ferramentas
-    const preferredModels = [
-      'llama-3.3-70b-versatile',
-      'llama3-70b-8192',
-      'llama-3.1-70b-versatile',
-      'llama-3.1-8b-instant',
-      'llama3-8b-8192',
-      'mixtral-8x7b-32768',
-      'gemma2-9b-it'
-    ];
-
-    for (const model of preferredModels) {
-      if (availableIds.includes(model)) {
+    // Procura na ordem de preferência pelos modelos de chat
+    for (const model of allowedChatModels) {
+      if (available.includes(model)) {
         return model;
       }
     }
-    
-    // Se nenhum dos preferidos for encontrado, usa o primeiro modelo da lista
-    if (availableIds.length > 0) {
-      return availableIds[0];
-    }
   } catch (err) {
-    console.warn('[Groq Models Warning] Não foi possível listar modelos:', err.message);
+    console.warn('[Groq Models Warning] Falha ao consultar lista:', err.message);
   }
-  return 'llama3-8b-8192';
+
+  // Fallback seguro de chat
+  return 'llama-3.1-8b-instant';
 }
 
 const tools = [
@@ -153,23 +150,23 @@ async function handleCustomerChat(tenantId, customerPhone, customerName, incomin
 
   const systemInstruction = `
 Você é a atendente virtual inteligente da barbearia.
-Hoje é: ${formattedToday} | Horário atual de referência: ${nowIso} (Horário de Brasília -03:00).
+Hoje é: ${formattedToday} | Horário atual: ${nowIso} (Horário de Brasília -03:00).
 
 REGRAS DE FUNCIONAMENTO:
 - Dias de funcionamento: ${workDays}
 - Horário de atendimento: das ${openTime} às ${closeTime}
-- Intervalo de almoço: das ${lunchStart} às ${lunchEnd} (NÃO agendar nesse período)
+- Intervalo de almoço: das ${lunchStart} às ${lunchEnd} (NÃO agendar nesse intervalo)
 
 Serviços disponíveis:
 ${servicesList || 'Nenhum serviço cadastrado'}
 
 DIRETRIZES OBRIGATÓRIAS:
-1. Seja educado, objetivo e rápido.
-2. Quando o cliente disser a data/hora e o serviço (ex: "amanhã às 10h degradê"):
-   - Verifique se o dia/horário está dentro do funcionamento.
-   - Execute IMEDIATAMENTE a ferramenta "bookAppointment" passando a data no formato ISO com offset (-03:00).
-   - Assim que a ferramenta retornar sucesso, confirme o corte, serviço, data, horário e valor.
-3. Se o cliente perguntar horários disponíveis, chame "checkAvailability".
+1. Seja educado, prestativo e objetivo.
+2. Quando o cliente escolher o serviço, dia e horário:
+   - Verifique se está dentro do horário e dias de atendimento.
+   - Execute IMEDIATAMENTE a ferramenta "bookAppointment" passando a data/hora ISO com offset (-03:00).
+   - Ao receber o retorno de sucesso da ferramenta, confirme todos os dados do agendamento para o cliente.
+3. Se o cliente perguntar os horários vagos, chame "checkAvailability".
 `;
 
   const messages = [
@@ -177,8 +174,8 @@ DIRETRIZES OBRIGATÓRIAS:
     { role: 'user', content: `[Cliente: ${customerName} | Telefone: ${customerPhone}]\nMensagem: ${incomingMessage}` },
   ];
 
-  const selectedModel = await getActiveGroqModel();
-  console.log(`[Tenant ${tenantId}] Usando modelo Groq: ${selectedModel}`);
+  const selectedModel = await getActiveChatModel();
+  console.log(`[Tenant ${tenantId}] Executando chat com modelo Groq: ${selectedModel}`);
 
   let response = await groq.chat.completions.create({
     model: selectedModel,
