@@ -1,5 +1,4 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const { processUserMessage } = require('./aiAgent');
 
 // Armazena as instâncias em memória por tenant
@@ -35,8 +34,7 @@ async function getOrInitWhatsApp(tenantId) {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--disable-gpu',
-        '--single-process'
+        '--disable-gpu'
       ]
     },
     webVersionCache: {
@@ -79,7 +77,6 @@ async function getOrInitWhatsApp(tenantId) {
   // Processamento de Mensagens
   client.on('message', async (msg) => {
     try {
-      // Ignora mensagens de grupos, status ou mensagens enviadas pelo próprio bot
       if (msg.from.includes('@g.us') || msg.isStatus || msg.fromMe) return;
 
       const customerPhone = msg.from.replace('@c.us', '');
@@ -88,7 +85,6 @@ async function getOrInitWhatsApp(tenantId) {
 
       console.log(`📩 [Tenant ${tenantId}] Msg de ${customerName} (${customerPhone}): ${text}`);
 
-      // Processa com a IA
       const reply = await processUserMessage(tenantId, customerPhone, customerName, text);
 
       if (reply) {
