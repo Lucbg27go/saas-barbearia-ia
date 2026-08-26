@@ -18,6 +18,42 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 // Modelo de chat rápido e compatível
 const GROQ_MODEL = 'openai/gpt-oss-20b';
 
+// Histórico de conversas em memória (chave: tenantId + telefone)
+// Guarda as últimas mensagens para dar contexto à IA
+const conversationHistory = new Map();
+const MAX_HISTORY_MESSAGES = 12; // ~6 pares de pergunta/resposta
+const HISTORY_TTL_MS = 30 * 60 * 1000; // limpa conversas paradas há 30min
+
+function getHistoryKey(tenantId, customerPhone) {
+  return `${tenantId}:${customerPhone}`;
+}
+
+function getHistory(tenantId, customerPhone) {
+  const key = getHistoryKey(tenantId, customerPhone);
+  const entry = conversationHistory.get(key);
+  if (!entry) return [];
+  if (Date.now() - entry.updatedAt > HISTORY_TTL_MS) {
+    conversationHistory.delete(key);
+    return [];
+  }
+  return entry.messages;
+}
+
+function pushHistory(tenantId, customerPhone, role, content) {
+  const key = getHistoryKey(tenantId, customerPhone);
+  const entry = conversationHistory.get(key) || { messages: [], updatedAt: Date.now() };
+  entry.messages.push({ role, content });
+  if (entry.messages.length > MAX_HISTORY_MESSAGES) {
+    entry.messages = entry.messages.slice(-MAX_HISTORY_MESSAGES);
+  }
+  entry.updatedAt = Date.now();
+  conversationHistory.set(key, entry);
+}
+
+function clearHistory(tenantId, customerPhone) {
+  conversationHistory.delete(getHistoryKey(tenantId, customerPhone));
+}
+
 async function handleCustomerChat(tenantId, customerPhone, customerName, incomingMessage) {
   try {
     // 1. Verifica status do tenant
@@ -58,7 +94,8 @@ async function handleCustomerChat(tenantId, customerPhone, customerName, incomin
     const nowIso = brasiliaNow.toISOString();
 
     const systemPrompt = `
-Você é a atendente virtual inteligente da Barbearia.
+Você é a atendente virtual da Barbearia. Converse de forma natural, calorosa e objetiva, como uma pessoa real faria pelo WhatsApp — evite soar robótica ou repetitiva.
+
 Hoje é: ${formattedToday} | Horário atual: ${nowIso} (Horário de Brasília -03:00).
 
 REGRAS DA BARBEARIA:
@@ -68,6 +105,12 @@ REGRAS DA BARBEARIA:
 
 SERVIÇOS CADASTRADOS:
 ${servicesList}
+
+COMO CONVERSAR:
+- Use o HISTÓRICO da conversa para lembrar o que o cliente já disse (serviço, data, hora). NUNCA pergunte de novo algo que ele já respondeu.
+- Só liste todos os serviços na primeira vez ou se o cliente pedir. Depois disso, seja direto.
+- Calcule datas relativas ("amanhã", "hoje", "sexta que vem") com base na data de hoje informada acima.
+- Se faltar só um dado (ex: só falta a hora), pergunte só isso, sem repetir o resto.
 
 INSTRUÇÃO DE RESPOSTA OBRIGATÓRIA:
 Você SEMPRE deve responder em formato JSON estrito, sem formatações Markdown adicionais fora do JSON.
@@ -85,14 +128,17 @@ FORMATO DO JSON:
 
 COMO DECIDIR A ACTION:
 - Se o cliente apenas disser "olá", perguntar serviços ou tiver dúvidas -> "action": "reply"
-- Se o cliente pedir para agendar e já tiver informado o serviço e horário -> "action": "book", preencha o "bookingData" com a data/hora calculada e coloque em "replyMessage" uma confirmação cordial com o resumo do agendamento (serviço, data, hora e valor).
+- Se o cliente pedir para agendar e já tiver informado o serviço e horário (mesmo que em mensagens anteriores) -> "action": "book", preencha o "bookingData" com a data/hora calculada e coloque em "replyMessage" uma confirmação cordial com o resumo do agendamento (serviço, data, hora e valor).
 - Não agende em horários fora do expediente ou durante o almoço.
 `;
+
+    const history = getHistory(tenantId, customerPhone);
 
     const chatCompletion = await groq.chat.completions.create({
       model: GROQ_MODEL,
       messages: [
         { role: 'system', content: systemPrompt },
+        ...history,
         { role: 'user', content: `[Cliente: ${customerName} | Telefone: ${customerPhone}]\nMensagem: ${incomingMessage}` }
       ],
       response_format: { type: 'json_object' }
@@ -106,6 +152,10 @@ COMO DECIDIR A ACTION:
       return rawResponse;
     }
 
+    // Salva a troca no histórico (mensagem do cliente + resposta da IA)
+    pushHistory(tenantId, customerPhone, 'user', incomingMessage);
+    pushHistory(tenantId, customerPhone, 'assistant', parsed.replyMessage || rawResponse);
+
     // Se a IA decidiu agendar
     if (parsed.action === 'book' && parsed.bookingData) {
       try {
@@ -116,6 +166,8 @@ COMO DECIDIR A ACTION:
           startTime: parsed.bookingData.startTime,
           durationMinutes: parsed.bookingData.durationMinutes || 30
         });
+        // Agendamento concluído: limpa o histórico pra próxima conversa começar do zero
+        clearHistory(tenantId, customerPhone);
       } catch (bookErr) {
         console.error('[Calendar Booking Error]', bookErr);
       }
