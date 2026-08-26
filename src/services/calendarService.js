@@ -131,25 +131,31 @@ async function createAppointmentEvent(tenantId, { customerName, customerPhone, s
     },
   });
 
-  await supabase.from('appointments').insert([
-    {
-      tenant_id: tenantId,
-      customer_name: customerName,
-      customer_phone: customerPhone,
-      service_name: serviceName || 'Corte',
-      start_time: start.toISOString(),
-      end_time: end.toISOString(),
-      price: price ? parseFloat(price) : 40.0,
-      google_event_id: event.data.id,
-      status: 'confirmed'
-    }
-  ]);
+  const { data: inserted, error: insertErr } = await supabase
+    .from('appointments')
+    .insert([
+      {
+        tenant_id: tenantId,
+        customer_name: customerName,
+        customer_phone: customerPhone,
+        service_name: serviceName || 'Corte',
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        price: price ? parseFloat(price) : 40.0,
+        google_event_id: event.data.id,
+        status: 'confirmed'
+      }
+    ])
+    .select()
+    .single();
 
-  return event.data;
+  if (insertErr) console.error('[Appointment Insert Error]', insertErr);
+
+  return { ...event.data, appointmentId: inserted?.id };
 }
 
-// 1. Cancelar Agendamento
-async function cancelAppointmentEvent(tenantId, customerPhone) {
+// Busca o agendamento ativo mais recente de um cliente (sem executar nenhuma ação)
+async function findActiveAppointmentByPhone(tenantId, customerPhone) {
   const { data: appt, error } = await supabase
     .from('appointments')
     .select('*')
@@ -160,11 +166,23 @@ async function cancelAppointmentEvent(tenantId, customerPhone) {
     .limit(1)
     .single();
 
+  if (error || !appt) return null;
+  return appt;
+}
+
+// Cancela um agendamento específico pelo ID (usado só após confirmação explícita)
+async function cancelAppointmentById(tenantId, appointmentId) {
+  const { data: appt, error } = await supabase
+    .from('appointments')
+    .select('*')
+    .eq('id', appointmentId)
+    .eq('tenant_id', tenantId)
+    .single();
+
   if (error || !appt) {
-    throw new Error('Nenhum agendamento ativo encontrado para este telefone.');
+    throw new Error('Agendamento não encontrado.');
   }
 
-  // Deletar do Google Calendar se houver ID
   if (appt.google_event_id) {
     try {
       const auth = await getOAuth2Client(tenantId);
@@ -186,25 +204,20 @@ async function cancelAppointmentEvent(tenantId, customerPhone) {
   return { success: true, serviceName: appt.service_name, startTime: appt.start_time };
 }
 
-// 2. Remarcar Agendamento
-
-async function rescheduleAppointmentEvent(tenantId, customerPhone, newStartTime) {
+// Remarca um agendamento específico pelo ID (usado só após confirmação explícita)
+async function rescheduleAppointmentById(tenantId, appointmentId, newStartTime) {
   const { data: appt, error } = await supabase
     .from('appointments')
     .select('*')
+    .eq('id', appointmentId)
     .eq('tenant_id', tenantId)
-    .ilike('customer_phone', `%${customerPhone.slice(-8)}%`)
-    .eq('status', 'confirmed')
-    .order('start_time', { ascending: false })
-    .limit(1)
     .single();
 
   if (error || !appt) {
-    throw new Error('Nenhum agendamento ativo encontrado para remarcar.');
+    throw new Error('Agendamento não encontrado.');
   }
 
   const start = parseDateTimeSafe(newStartTime);
-  // Preserva a duração original do serviço agendado, em vez de fixar 30min
   const originalDurationMs = new Date(appt.end_time).getTime() - new Date(appt.start_time).getTime();
   const duration = originalDurationMs > 0 ? originalDurationMs / (60 * 1000) : 30;
   const end = new Date(start.getTime() + duration * 60 * 1000);
@@ -236,3 +249,13 @@ async function rescheduleAppointmentEvent(tenantId, customerPhone, newStartTime)
 
   return { success: true, serviceName: appt.service_name, newStart: start.toISOString(), durationMinutes: duration };
 }
+
+module.exports = {
+  getGoogleAuthUrl,
+  handleGoogleCallback,
+  listBusySlots,
+  createAppointmentEvent,
+  findActiveAppointmentByPhone,
+  cancelAppointmentById,
+  rescheduleAppointmentById,
+};
