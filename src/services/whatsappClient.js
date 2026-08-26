@@ -1,55 +1,33 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const QRCode = require('qrcode');
-const { handleCustomerChat } = require('./aiAgent');
-const fs = require('fs');
-const path = require('path');
+const qrcode = require('qrcode-terminal');
+const { processUserMessage } = require('./aiAgent');
 
-// Mapa para gerenciar múltiplas instâncias em memória
+// Armazena as instâncias em memória por tenant
 const sessions = new Map();
 
-const macChromePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const linuxChromePath = '/usr/bin/google-chrome-stable';
-const executablePath = fs.existsSync(macChromePath)
-  ? macChromePath
-  : fs.existsSync(linuxChromePath)
-  ? linuxChromePath
-  : undefined;
-
 async function getOrInitWhatsApp(tenantId) {
-  if (!tenantId) throw new Error('Tenant ID é obrigatório.');
-
-  let session = sessions.get(tenantId);
-
-  // Se a sessão já existe e está conectada ou inicializando, retorna o estado atual
-  if (session && (session.status === 'connected' || session.isInitializing)) {
-    return session;
+  if (sessions.has(tenantId)) {
+    const existing = sessions.get(tenantId);
+    if (existing.client) return existing;
   }
 
-  // Cria entrada de sessão caso não exista
-  if (!session) {
-    session = {
-      client: null,
-      status: 'connecting',
-      qrcode: null,
-      startTime: Math.floor(Date.now() / 1000),
-      isInitializing: true,
-    };
-    sessions.set(tenantId, session);
-  } else {
-    session.isInitializing = true;
-    session.status = 'connecting';
-  }
+  const sessionState = {
+    status: 'initializing',
+    qrcode: null,
+    client: null,
+  };
+  sessions.set(tenantId, sessionState);
 
-  console.log(`🔄 [Tenant ${tenantId}] Inicializando WhatsApp Web dedicado...`);
+  console.log(`[Tenant ${tenantId}] Inicializando WhatsApp Web...`);
 
   const client = new Client({
     authStrategy: new LocalAuth({
       clientId: `tenant_${tenantId}`,
-      dataPath: './wwebjs_auth',
+      dataPath: './.wwebjs_auth'
     }),
     puppeteer: {
       headless: true,
-      executablePath: executablePath,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -58,91 +36,87 @@ async function getOrInitWhatsApp(tenantId) {
         '--no-first-run',
         '--no-zygote',
         '--disable-gpu',
-      ],
+        '--single-process'
+      ]
     },
-  });
-
-  session.client = client;
-
-  client.on('qr', async (qr) => {
-    try {
-      session.qrcode = await QRCode.toDataURL(qr);
-      session.status = 'connecting';
-      console.log(`⚡ [Tenant ${tenantId}] QR Code gerado.`);
-    } catch (err) {
-      console.error(`[Tenant ${tenantId}] Erro ao gerar QR:`, err.message);
+    webVersionCache: {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1018944888-alpha.html',
     }
   });
 
+  sessionState.client = client;
+
+  client.on('qr', (qr) => {
+    console.log(`⚡ [Tenant ${tenantId}] QR Code gerado.`);
+    sessionState.status = 'qrcode';
+    sessionState.qrcode = qr;
+  });
+
   client.on('ready', () => {
-    session.status = 'connected';
-    session.qrcode = null;
-    session.isInitializing = false;
-    session.startTime = Math.floor(Date.now() / 1000);
-    console.log(`✅ [Tenant ${tenantId}] Conectado e operacional!`);
+    console.log(`✅ [Tenant ${tenantId}] WhatsApp pronto e operacional!`);
+    sessionState.status = 'connected';
+    sessionState.qrcode = null;
   });
 
   client.on('authenticated', () => {
-    console.log(`🔑 [Tenant ${tenantId}] Sessão autenticada!`);
+    console.log(`🔑 [Tenant ${tenantId}] Autenticado com sucesso.`);
+    sessionState.status = 'authenticated';
   });
 
   client.on('auth_failure', (msg) => {
     console.error(`❌ [Tenant ${tenantId}] Falha de autenticação:`, msg);
-    session.status = 'disconnected';
-    session.qrcode = null;
-    session.isInitializing = false;
+    sessionState.status = 'error';
   });
 
-  client.on('disconnected', async () => {
-    console.log(`❌ [Tenant ${tenantId}] Desconectado pelo WhatsApp.`);
-    session.status = 'disconnected';
-    session.qrcode = null;
-    session.isInitializing = false;
-    try {
-      await client.destroy();
-    } catch (e) {}
+  client.on('disconnected', (reason) => {
+    console.warn(`⚠️ [Tenant ${tenantId}] Desconectado:`, reason);
+    sessionState.status = 'disconnected';
+    sessionState.qrcode = null;
     sessions.delete(tenantId);
   });
 
+  // Processamento de Mensagens
   client.on('message', async (msg) => {
-    if (msg.timestamp < session.startTime) return;
-    if (msg.fromMe || msg.isGroupMsg || msg.from === 'status@broadcast') return;
-
-    const from = msg.from;
-    const text = msg.body;
-    const contact = await msg.getContact();
-    const customerName = contact.pushname || contact.name || 'Cliente';
-    const customerPhone = from.replace('@c.us', '');
-
-    console.log(`📩 [Tenant ${tenantId}] Msg de ${customerName} (${customerPhone}): ${text}`);
-
     try {
-      const reply = await handleCustomerChat(tenantId, customerPhone, customerName, text);
+      // Ignora mensagens de grupos, status ou mensagens enviadas pelo próprio bot
+      if (msg.from.includes('@g.us') || msg.isStatus || msg.fromMe) return;
+
+      const customerPhone = msg.from.replace('@c.us', '');
+      const customerName = msg._data?.notifyName || 'Cliente';
+      const text = msg.body;
+
+      console.log(`📩 [Tenant ${tenantId}] Msg de ${customerName} (${customerPhone}): ${text}`);
+
+      // Processa com a IA
+      const reply = await processUserMessage(tenantId, customerPhone, customerName, text);
+
       if (reply) {
-        await client.sendMessage(from, reply);
+        await client.sendMessage(msg.from, reply);
       }
     } catch (err) {
-      console.error(`[Tenant ${tenantId}] Erro na resposta IA:`, err.message);
+      console.error(`❌ [Tenant ${tenantId}] Erro ao processar mensagem:`, err);
     }
   });
 
-  client.initialize().catch((err) => {
-    console.error(`❌ [Tenant ${tenantId}] Erro ao inicializar Puppeteer:`, err.message);
-    session.isInitializing = false;
-    sessions.delete(tenantId);
-  });
+  try {
+    await client.initialize();
+  } catch (initErr) {
+    console.error(`❌ [Tenant ${tenantId}] Erro ao inicializar client:`, initErr);
+    sessionState.status = 'error';
+  }
 
-  return session;
+  return sessionState;
 }
 
 function getWhatsAppStatus(tenantId) {
-  const session = sessions.get(tenantId);
-  if (!session) {
+  if (!sessions.has(tenantId)) {
     return { status: 'disconnected', qrcode: null };
   }
+  const session = sessions.get(tenantId);
   return {
     status: session.status,
-    qrcode: session.qrcode,
+    qrcode: session.qrcode
   };
 }
 
