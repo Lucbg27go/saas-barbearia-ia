@@ -187,6 +187,7 @@ async function cancelAppointmentEvent(tenantId, customerPhone) {
 }
 
 // 2. Remarcar Agendamento
+
 async function rescheduleAppointmentEvent(tenantId, customerPhone, newStartTime) {
   const { data: appt, error } = await supabase
     .from('appointments')
@@ -203,7 +204,9 @@ async function rescheduleAppointmentEvent(tenantId, customerPhone, newStartTime)
   }
 
   const start = parseDateTimeSafe(newStartTime);
-  const duration = 30; // duração padrão ou baseada no serviço
+  // Preserva a duração original do serviço agendado, em vez de fixar 30min
+  const originalDurationMs = new Date(appt.end_time).getTime() - new Date(appt.start_time).getTime();
+  const duration = originalDurationMs > 0 ? originalDurationMs / (60 * 1000) : 30;
   const end = new Date(start.getTime() + duration * 60 * 1000);
 
   if (appt.google_event_id) {
@@ -231,14 +234,5 @@ async function rescheduleAppointmentEvent(tenantId, customerPhone, newStartTime)
     })
     .eq('id', appt.id);
 
-  return { success: true, serviceName: appt.service_name, newStart: start.toISOString() };
+  return { success: true, serviceName: appt.service_name, newStart: start.toISOString(), durationMinutes: duration };
 }
-
-module.exports = {
-  getGoogleAuthUrl,
-  handleGoogleCallback,
-  listBusySlots,
-  createAppointmentEvent,
-  cancelAppointmentEvent,
-  rescheduleAppointmentEvent,
-};
