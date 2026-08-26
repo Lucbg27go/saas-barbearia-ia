@@ -86,7 +86,7 @@ async function handleCustomerChat(tenantId, customerPhone, customerName, incomin
   // 1. Verifica status da assinatura do Tenant
   const { data: tenant } = await supabase
     .from('tenants')
-    .select('subscription_status, trial_ends_at')
+    .select('*')
     .eq('id', tenantId)
     .single();
 
@@ -97,42 +97,46 @@ async function handleCustomerChat(tenantId, customerPhone, customerName, incomin
     return "Olá! Nosso canal de agendamento automático está temporariamente em manutenção. Por favor, entre em contato diretamente com a barbearia pelo telefone principal.";
   }
 
-  const [{ data: services }, { data: settings }] = await Promise.all([
-    supabase.from('services').select('name, price, duration_minutes').eq('tenant_id', tenantId),
-    supabase.from('business_settings').select('*').eq('tenant_id', tenantId).maybeSingle()
-  ]);
+  // 2. Busca os serviços cadastrados
+  const { data: services } = await supabase
+    .from('services')
+    .select('name, price, duration_minutes')
+    .eq('tenant_id', tenantId);
 
   const servicesList = (services || [])
-    .map(s => `- ${s.name}: R$ ${s.price} (${s.duration_minutes} min)`)
+    .map(s => `- ${s.name}: R$ ${s.price} (${s.duration_minutes || 30} min)`)
     .join('\n');
 
-  const openTime = settings?.open_time || '09:00';
-  const closeTime = settings?.close_time || '19:00';
-  const lunchStart = settings?.lunch_start || '12:00';
-  const lunchEnd = settings?.lunch_end || '13:00';
-  const workDays = (settings?.work_days || ['segunda a sábado']).join(', ');
+  // Configurações de funcionamento da tabela tenants
+  const openTime = tenant?.open_time || '09:00';
+  const closeTime = tenant?.close_time || '19:00';
+  const lunchStart = tenant?.lunch_start || '12:00';
+  const lunchEnd = tenant?.lunch_end || '13:00';
+  const workDays = Array.isArray(tenant?.work_days) 
+    ? tenant.work_days.join(', ') 
+    : 'seg, ter, qua, qui, sex, sab';
 
   const nowIso = new Date().toISOString();
 
   const systemInstruction = `
 Você é o atendente virtual inteligente da barbearia.
-Hoje e agora é: ${nowIso} (Fuso horário de Brasília -03:00).
+Data e hora atual de referência: ${nowIso} (Fuso horário de Brasília -03:00).
 
 REGRAS DE FUNCIONAMENTO:
 - Dias de atendimento: ${workDays}
 - Horário de abertura: ${openTime} | Horário de fechamento: ${closeTime}
-- Intervalo de almoço / pausa: das ${lunchStart} às ${lunchEnd} (não agendar nesse intervalo)
+- Intervalo de almoço / pausa: das ${lunchStart} às ${lunchEnd} (não agendar nesse período)
 
 Serviços disponíveis e preços:
 ${servicesList}
 
 Diretrizes de Atendimento:
 - Seja simpático, prestativo e direto.
-- Respeite rigorosamente o horário de funcionamento e intervalo de almoço ao sugerir ou aceitar horários.
-- Para verificar horários ocupados, chame "checkAvailability".
-- Para novos agendamentos confirmados, chame "bookAppointment".
-- Para cancelar horários, chame "cancelAppointment".
-- Para remarcar, chame "rescheduleAppointment".
+- Respeite rigorosamente o horário de funcionamento e intervalo de almoço.
+- Para verificar horários ocupados em uma data, execute a ferramenta "checkAvailability".
+- Quando o cliente definir o serviço, dia e horário, execute IMEDIATAMENTE a ferramenta "bookAppointment" e confirme o agendamento na resposta.
+- Para cancelar horários, execute "cancelAppointment".
+- Para remarcar, execute "rescheduleAppointment".
 `;
 
   const messages = [
@@ -140,8 +144,9 @@ Diretrizes de Atendimento:
     { role: 'user', content: `[Cliente: ${customerName} | Telefone: ${customerPhone}]\nMensagem: ${incomingMessage}` },
   ];
 
+  // Modelo Groq Llama 3.3 70B
   let response = await groq.chat.completions.create({
-    model: 'openai/gpt-oss-120b',
+    model: 'llama-3.3-70b-versatile',
     messages,
     tools,
     tool_choice: 'auto',
@@ -171,7 +176,7 @@ Diretrizes de Atendimento:
             startTime,
             durationMinutes,
           });
-          functionResponseData = { success: true, eventId: event.id, start: startTime };
+          functionResponseData = { success: true, eventId: event?.id || 'ok', start: startTime };
         } else if (functionName === 'cancelAppointment') {
           const resCancel = await cancelAppointmentEvent(tenantId, args.customerPhone || customerPhone);
           functionResponseData = resCancel;
@@ -184,6 +189,7 @@ Diretrizes de Atendimento:
           functionResponseData = resReschedule;
         }
       } catch (err) {
+        console.error(`Erro ao executar ferramenta ${functionName}:`, err);
         functionResponseData = { error: err.message };
       }
 
@@ -195,7 +201,7 @@ Diretrizes de Atendimento:
     }
 
     response = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-120b',
+      model: 'llama-3.3-70b-versatile',
       messages,
       tools,
       tool_choice: 'auto',
@@ -207,4 +213,8 @@ Diretrizes de Atendimento:
   return responseMessage.content;
 }
 
-module.exports = { handleCustomerChat };
+// Exporta tanto processUserMessage quanto handleCustomerChat para compatibilidade total
+module.exports = {
+  processUserMessage: handleCustomerChat,
+  handleCustomerChat,
+};
