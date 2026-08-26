@@ -2,9 +2,14 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-// Importações com os caminhos corretos dentro de /services
-const { initTenantSession, sessions } = require('./services/whatsappClient');
-const { initReminderCron } = require('./services/reminderService');
+// Importação resiliente dos serviços
+const whatsappService = require('./services/whatsappService') || {};
+const whatsappClient = require('./services/whatsappClient') || {};
+const { initReminderCron } = require('./services/reminderService') || {};
+
+// Mapeamento das funções exportadas
+const initClient = whatsappService.initWhatsAppClient || whatsappClient.initTenantSession || whatsappClient.getOrInitWhatsApp;
+const getQr = whatsappService.getQrCode || whatsappClient.getWhatsAppStatus;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,25 +17,33 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Rota de Health Check
+// Health Check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// Rota para obter o QR Code (chamada pelo frontend)
+// Rota do QR Code consumida pelo Frontend
 app.get('/api/whatsapp/qrcode/:tenantId', async (req, res) => {
   try {
     const { tenantId } = req.params;
-    let session = sessions.get ? sessions.get(tenantId) : sessions[tenantId];
+    let session = null;
 
-    if (!session) {
-      session = await initTenantSession(tenantId);
+    if (typeof getQr === 'function') {
+      session = getQr(tenantId);
     }
 
+    if (!session && typeof initClient === 'function') {
+      session = await initClient(tenantId);
+    }
+
+    // Se a sessão for um objeto ou string
+    const qrcode = session?.qrCodeDataUrl || session?.qr || session?.qrcode || (typeof session === 'string' ? session : null);
+    const status = session?.status || (qrcode ? 'qr_ready' : 'initializing');
+
     res.json({
-      status: session?.status || 'initializing',
-      qrcode: session?.qr || session?.qrCodeDataUrl || null,
-      qr: session?.qr || null
+      status,
+      qrcode,
+      qr: qrcode
     });
   } catch (error) {
     console.error('[WhatsApp QRCode Error]', error);
@@ -38,40 +51,43 @@ app.get('/api/whatsapp/qrcode/:tenantId', async (req, res) => {
   }
 });
 
-// Rota para inicializar a sessão do WhatsApp de um tenant
+// Rota de inicialização
 app.post('/api/whatsapp/init', async (req, res) => {
   try {
     const tenant_id = req.body.tenant_id || req.body.tenantId;
-    if (!tenant_id) {
-      return res.status(400).json({ error: 'tenant_id é obrigatório.' });
+    if (!tenant_id) return res.status(400).json({ error: 'tenant_id é obrigatório.' });
+
+    let session = null;
+    if (typeof initClient === 'function') {
+      session = await initClient(tenant_id);
     }
 
-    const session = await initTenantSession(tenant_id);
-    res.json({ status: 'initialized', qr: session.qr || null });
+    res.json({ status: 'initialized', qr: session?.qr || session?.qrCodeDataUrl || null });
   } catch (error) {
     console.error('[WhatsApp Init Error]', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Rota para consultar o status da sessão
+// Rota de status
 app.get('/api/whatsapp/status/:tenant_id', (req, res) => {
   const tenant_id = req.params.tenant_id || req.params.tenantId;
-  const session = sessions.get ? sessions.get(tenant_id) : sessions[tenant_id];
+  let session = null;
 
-  if (!session) {
-    return res.json({ status: 'disconnected', qr: null });
+  if (typeof getQr === 'function') {
+    session = getQr(tenant_id);
   }
 
   res.json({
-    status: session.status,
-    qr: session.qr || null,
-    qrcode: session.qr || session.qrCodeDataUrl || null
+    status: session?.status || 'disconnected',
+    qr: session?.qr || session?.qrCodeDataUrl || null,
+    qrcode: session?.qr || session?.qrCodeDataUrl || null
   });
 });
 
-// Inicializa a rotina de lembretes automáticos
-initReminderCron();
+if (typeof initReminderCron === 'function') {
+  initReminderCron();
+}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Servidor rodando com sucesso na porta ${PORT}`);
