@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const { createClient } = require('@supabase/supabase-js');
-const { sessions } = require('./whatsappService');
+const { sessions } = require('./whatsappClient');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -9,64 +9,51 @@ const supabase = createClient(
 );
 
 function initReminderCron() {
-  // Executa todo minuto
+  // Executa a cada minuto verificando agendamentos
   cron.schedule('* * * * *', async () => {
     try {
       const now = new Date();
-      // Janela de busca: agendamentos entre 55 e 65 minutos a partir de agora
-      const windowStart = new Date(now.getTime() + 55 * 60 * 1000).toISOString();
-      const windowEnd = new Date(now.getTime() + 65 * 60 * 1000).toISOString();
+      const inTwoHours = new Date(now.getTime() + 2 * 60 * 60 * 1000);
 
-      const { data: upcomingAppts, error } = await supabase
+      const { data: appointments, error } = await supabase
         .from('appointments')
-        .select('*')
-        .eq('status', 'confirmed')
-        .is('reminder_sent', null)
-        .gte('start_time', windowStart)
-        .lte('start_time', windowEnd);
+        .select('*, services(*)')
+        .eq('reminder_sent', false)
+        .lte('start_time', inTwoHours.toISOString())
+        .gt('start_time', now.toISOString());
 
-      if (error || !upcomingAppts || upcomingAppts.length === 0) {
+      if (error) {
+        console.error('[Reminder Cron DB Error]', error);
         return;
       }
 
-      for (const appt of upcomingAppts) {
-        const clientSession = sessions[appt.tenant_id];
-        
-        if (clientSession && clientSession.status === 'connected') {
-          // Formata o número do cliente para o padrão do WhatsApp Web
-          let cleanPhone = String(appt.customer_phone).replace(/\D/g, '');
-          if (!cleanPhone.includes('@c.us')) {
-            cleanPhone = `${cleanPhone}@c.us`;
-          }
+      if (!appointments || appointments.length === 0) return;
 
-          const horaFormatada = new Date(appt.start_time).toLocaleTimeString('pt-BR', {
+      for (const appt of appointments) {
+        const session = sessions.get(appt.tenant_id);
+        if (session && session.status === 'connected' && session.client) {
+          const timeFormatted = new Date(appt.start_time).toLocaleTimeString([], {
             hour: '2-digit',
-            minute: '2-digit',
-            timeZone: 'America/Sao_Paulo'
+            minute: '2-digit'
           });
-
-          const msg = `Olá, ${appt.customer_name}! ✂️\n\nPassando para lembrar que o seu horário para *${appt.service_name || 'Corte'}* está marcado para hoje às *${horaFormatada}*.\n\nContamos com a sua presença! Se precisar remarcar ou cancelar, é só me avisar por aqui.`;
+          const msg = `Olá! Passando para lembrar do seu horário hoje às ${timeFormatted}.`;
 
           try {
-            await clientSession.client.sendMessage(cleanPhone, msg);
-            console.log(`[Lembrete] Enviado com sucesso para ${appt.customer_name} (${cleanPhone})`);
-
-            // Marca como enviado no banco para não duplicar
+            await session.client.sendMessage(appt.customer_phone, msg);
             await supabase
               .from('appointments')
               .update({ reminder_sent: true })
               .eq('id', appt.id);
-          } catch (sendErr) {
-            console.error(`[Lembrete] Erro ao enviar para ${cleanPhone}:`, sendErr.message);
+            console.log(`[Reminder] Lembrete enviado para ${appt.customer_phone}`);
+          } catch (err) {
+            console.error('[Reminder Send Error]', err);
           }
         }
       }
-    } catch (err) {
-      console.error('[Lembrete Cron] Erro na execução:', err.message);
+    } catch (globalErr) {
+      console.error('[Reminder Global Error]', globalErr);
     }
   });
-
-  console.log('⏰ Rotina de Lembretes Automáticos (Cron Job) iniciada.');
 }
 
 module.exports = { initReminderCron };
