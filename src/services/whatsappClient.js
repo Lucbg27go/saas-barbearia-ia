@@ -45,13 +45,13 @@ async function getOrInitWhatsApp(tenantId) {
   sessionState.client = client;
 
   client.on('qr', (qr) => {
-    console.log(`⚡ [Tenant ${tenantId}] QR Code gerado.`);
+    console.log(`⚡ [Tenant ${tenantId}] QR Code gerado com sucesso.`);
     sessionState.status = 'qrcode';
     sessionState.qrcode = qr;
   });
 
   client.on('ready', () => {
-    console.log(`✅ [Tenant ${tenantId}] WhatsApp pronto e operacional!`);
+    console.log(`✅ [Tenant ${tenantId}] WhatsApp conectado e pronto para uso!`);
     sessionState.status = 'connected';
     sessionState.qrcode = null;
   });
@@ -81,7 +81,7 @@ async function getOrInitWhatsApp(tenantId) {
       const customerName = msg._data?.notifyName || 'Cliente';
       const text = msg.body;
 
-      console.log(`📩 [Tenant ${tenantId}] Msg de ${customerName} (${customerPhone}): ${text}`);
+      console.log(`📩 [Tenant ${tenantId}] Mensagem de ${customerName} (${customerPhone}): ${text}`);
 
       const reply = await processUserMessage(tenantId, customerPhone, customerName, text);
 
@@ -89,7 +89,7 @@ async function getOrInitWhatsApp(tenantId) {
         await client.sendMessage(msg.from, reply);
       }
     } catch (err) {
-      console.error(`❌ [Tenant ${tenantId}] Erro ao processar mensagem:`, err);
+      console.error(`❌ [Tenant ${tenantId}] Erro no processamento da mensagem:`, err);
     }
   });
 
