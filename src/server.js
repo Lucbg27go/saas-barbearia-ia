@@ -141,7 +141,7 @@ app.get('/api/settings/:tenantId', async (req, res) => {
 });
 
 app.post('/api/settings/:tenantId', async (req, res) => {
-  const { tenantId } = req.params;
+  const { tenantId } = req.body;
   const { open_time, close_time, lunch_start, lunch_end, work_days } = req.body;
 
   const { data, error } = await supabase
