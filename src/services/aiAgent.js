@@ -16,7 +16,7 @@ const supabase = createClient(
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // Modelo de chat rápido e compatível
-const GROQ_MODEL = 'llama3-8b-8192';
+const GROQ_MODEL = 'openai/gpt-oss-20b';
 
 async function handleCustomerChat(tenantId, customerPhone, customerName, incomingMessage) {
   try {
@@ -31,104 +31,4 @@ async function handleCustomerChat(tenantId, customerPhone, customerName, incomin
 
     const isTrialExpired = tenant?.trial_ends_at && new Date(tenant.trial_ends_at) < new Date();
     if (tenant?.subscription_status !== 'active' && isTrialExpired) {
-      return "Olá! Nosso canal de agendamento automático está temporariamente em manutenção. Por favor, entre em contato diretamente com a barbearia.";
-    }
-
-    // 2. Busca os serviços cadastrados
-    const { data: services } = await supabase
-      .from('services')
-      .select('name, price, duration_minutes')
-      .eq('tenant_id', tenantId);
-
-    const servicesList = (services && services.length > 0)
-      ? services.map(s => `- ${s.name}: R$ ${parseFloat(s.price).toFixed(2)} (${s.duration_minutes || 30} min)`).join('\n')
-      : 'Nenhum serviço cadastrado';
-
-    // Regras de horário
-    const openTime = tenant?.open_time || '09:00';
-    const closeTime = tenant?.close_time || '19:00';
-    const lunchStart = tenant?.lunch_start || '12:00';
-    const lunchEnd = tenant?.lunch_end || '13:00';
-    const workDays = Array.isArray(tenant?.work_days) && tenant.work_days.length > 0
-      ? tenant.work_days.join(', ')
-      : 'seg, ter, qua, qui, sex, sab, dom';
-
-    const brasiliaNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-    const formattedToday = brasiliaNow.toISOString().split('T')[0];
-    const nowIso = brasiliaNow.toISOString();
-
-    const systemPrompt = `
-Você é a atendente virtual inteligente da Barbearia.
-Hoje é: ${formattedToday} | Horário atual: ${nowIso} (Horário de Brasília -03:00).
-
-REGRAS DA BARBEARIA:
-- Dias de atendimento: ${workDays}
-- Horário: das ${openTime} às ${closeTime}
-- Intervalo de almoço: das ${lunchStart} às ${lunchEnd} (NÃO agendar nesse horário)
-
-SERVIÇOS CADASTRADOS:
-${servicesList}
-
-INSTRUÇÃO DE RESPOSTA OBRIGATÓRIA:
-Você SEMPRE deve responder em formato JSON estrito, sem formatações Markdown adicionais fora do JSON.
-
-FORMATO DO JSON:
-{
-  "action": "reply" | "book" | "check",
-  "replyMessage": "Texto da sua mensagem que o cliente vai ler no WhatsApp",
-  "bookingData": {
-    "serviceName": "Nome exato do serviço",
-    "startTime": "Data e hora ISO com offset -03:00 (Ex: ${formattedToday}T14:00:00-03:00)",
-    "durationMinutes": 30
-  }
-}
-
-COMO DECIDIR A ACTION:
-- Se o cliente apenas disser "olá", perguntar serviços ou tiver dúvidas -> "action": "reply"
-- Se o cliente pedir para agendar e já tiver informado o serviço e horário -> "action": "book", preencha o "bookingData" com a data/hora calculada e coloque em "replyMessage" uma confirmação cordial com o resumo do agendamento (serviço, data, hora e valor).
-- Não agende em horários fora do expediente ou durante o almoço.
-`;
-
-    const chatCompletion = await groq.chat.completions.create({
-      model: GROQ_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `[Cliente: ${customerName} | Telefone: ${customerPhone}]\nMensagem: ${incomingMessage}` }
-      ],
-      response_format: { type: 'json_object' }
-    });
-
-    const rawResponse = chatCompletion.choices[0]?.message?.content || '{}';
-    let parsed;
-    try {
-      parsed = JSON.parse(rawResponse);
-    } catch (e) {
-      return rawResponse;
-    }
-
-    // Se a IA decidiu agendar
-    if (parsed.action === 'book' && parsed.bookingData) {
-      try {
-        await createAppointmentEvent(tenantId, {
-          customerName,
-          customerPhone,
-          serviceName: parsed.bookingData.serviceName || 'Corte',
-          startTime: parsed.bookingData.startTime,
-          durationMinutes: parsed.bookingData.durationMinutes || 30
-        });
-      } catch (bookErr) {
-        console.error('[Calendar Booking Error]', bookErr);
-      }
-    }
-
-    return parsed.replyMessage || "Agendamento registrado com sucesso!";
-  } catch (err) {
-    console.error('[AI Handler Error]', err);
-    return "Olá! Tivemos uma pequena oscilação. Poderia me confirmar o serviço e o horário que deseja agendar?";
-  }
-}
-
-module.exports = {
-  processUserMessage: handleCustomerChat,
-  handleCustomerChat,
-};
+      return "Olá! Nosso canal de agendamento automático está temporariamente em
