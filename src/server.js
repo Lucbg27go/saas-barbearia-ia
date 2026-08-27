@@ -26,17 +26,54 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// --- GOOGLE CALENDAR ---
-app.get(['/auth/google', '/api/auth/google'], (req, res) => {
+// ---------- Middleware de autenticação ----------
+// Valida o token de sessão do Supabase e descobre o tenantId a partir do
+// usuário autenticado — NUNCA confia em tenantId vindo de query/params/body.
+async function authenticateTenant(req, res, next) {
   try {
-    const tenantId = req.query.tenantId || req.query.tenant_id;
-    if (!tenantId) return res.status(400).send('Tenant ID é obrigatório.');
-    res.redirect(getGoogleAuthUrl(tenantId));
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+    if (!token) {
+      return res.status(401).json({ error: 'Token de autenticação ausente.' });
+    }
+
+    const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !userData?.user) {
+      return res.status(401).json({ error: 'Sessão inválida ou expirada. Faça login novamente.' });
+    }
+
+    const { data: tenant, error: tenantErr } = await supabase
+      .from('tenants')
+      .select('*')
+      .eq('user_id', userData.user.id)
+      .single();
+
+    if (tenantErr || !tenant) {
+      return res.status(403).json({ error: 'Nenhuma barbearia vinculada a este usuário.' });
+    }
+
+    req.user = userData.user;
+    req.tenant = tenant;
+    req.tenantId = tenant.id;
+    next();
+  } catch (err) {
+    console.error('[Auth Middleware Error]', err);
+    res.status(500).json({ error: 'Erro ao validar autenticação.' });
+  }
+}
+
+// --- GOOGLE CALENDAR ---
+// Endpoint autenticado que devolve a URL de autorização (o frontend faz o redirect via JS)
+app.get('/api/auth/google-url', authenticateTenant, (req, res) => {
+  try {
+    res.json({ url: getGoogleAuthUrl(req.tenantId) });
   } catch (error) {
-    res.status(500).send('Erro Google Auth: ' + error.message);
+    res.status(500).json({ error: 'Erro ao gerar link do Google: ' + error.message });
   }
 });
 
+// Callback é chamado pelo próprio Google (redirect de navegador), não pelo frontend — continua público
 app.get(['/auth/google/callback', '/api/auth/google/callback'], async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -49,9 +86,9 @@ app.get(['/auth/google/callback', '/api/auth/google/callback'], async (req, res)
 });
 
 // --- WHATSAPP QR CODE ---
-app.get(['/api/whatsapp/qrcode/:tenantId', '/whatsapp/qrcode/:tenantId'], async (req, res) => {
+app.get('/api/whatsapp/qrcode', authenticateTenant, async (req, res) => {
   try {
-    const { tenantId } = req.params;
+    const tenantId = req.tenantId;
     let session = await getOrInitWhatsApp(tenantId);
 
     let attempts = 0;
@@ -76,17 +113,18 @@ app.get(['/api/whatsapp/qrcode/:tenantId', '/whatsapp/qrcode/:tenantId'], async 
   }
 });
 
-app.get(['/api/whatsapp/status/:tenantId', '/whatsapp/status/:tenantId'], (req, res) => {
-  res.json(getWhatsAppStatus(req.params.tenantId));
+app.get('/api/whatsapp/status', authenticateTenant, (req, res) => {
+  res.json(getWhatsAppStatus(req.tenantId));
 });
 
 // --- SERVIÇOS ---
-app.get(['/api/services/:tenantId', '/api/services'], async (req, res) => {
+app.get('/api/services', authenticateTenant, async (req, res) => {
   try {
-    const tenantId = req.params.tenantId || req.query.tenantId || req.query.tenant_id;
-    let q = supabase.from('services').select('*').order('created_at', { ascending: true });
-    if (tenantId) q = q.eq('tenant_id', tenantId);
-    const { data, error } = await q;
+    const { data, error } = await supabase
+      .from('services')
+      .select('*')
+      .eq('tenant_id', req.tenantId)
+      .order('created_at', { ascending: true });
     if (error) throw error;
     res.json(data || []);
   } catch (err) {
@@ -94,12 +132,11 @@ app.get(['/api/services/:tenantId', '/api/services'], async (req, res) => {
   }
 });
 
-app.post(['/api/services', '/api/services/:tenantId'], async (req, res) => {
+app.post('/api/services', authenticateTenant, async (req, res) => {
   try {
-    const tenantId = req.params.tenantId || req.body.tenant_id || req.body.tenantId;
     const { name, price, duration_minutes, duration } = req.body;
     const { data, error } = await supabase.from('services').insert([{
-      tenant_id: tenantId,
+      tenant_id: req.tenantId,
       name,
       price: parseFloat(price),
       duration_minutes: parseInt(duration_minutes || duration, 10) || 30
@@ -111,9 +148,14 @@ app.post(['/api/services', '/api/services/:tenantId'], async (req, res) => {
   }
 });
 
-app.delete(['/api/services/:id', '/api/services/:tenantId/:id'], async (req, res) => {
+app.delete('/api/services/:id', authenticateTenant, async (req, res) => {
   try {
-    const { error } = await supabase.from('services').delete().eq('id', req.params.id);
+    // Confere tenant_id também, pra garantir que ninguém apague serviço de outra barbearia
+    const { error } = await supabase
+      .from('services')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId);
     if (error) throw error;
     res.json({ success: true });
   } catch (err) {
@@ -122,12 +164,13 @@ app.delete(['/api/services/:id', '/api/services/:tenantId/:id'], async (req, res
 });
 
 // --- AGENDAMENTOS ---
-app.get(['/api/appointments/:tenantId', '/api/appointments'], async (req, res) => {
+app.get('/api/appointments', authenticateTenant, async (req, res) => {
   try {
-    const tenantId = req.params.tenantId || req.query.tenantId || req.query.tenant_id;
-    let q = supabase.from('appointments').select('*').order('start_time', { ascending: false });
-    if (tenantId) q = q.eq('tenant_id', tenantId);
-    const { data, error } = await q;
+    const { data, error } = await supabase
+      .from('appointments')
+      .select('*')
+      .eq('tenant_id', req.tenantId)
+      .order('start_time', { ascending: false });
     if (error) throw error;
     res.json(data || []);
   } catch (err) {
@@ -136,28 +179,23 @@ app.get(['/api/appointments/:tenantId', '/api/appointments'], async (req, res) =
 });
 
 // --- CONFIGURAÇÕES DE HORÁRIO ---
-app.get(['/api/settings/:tenantId', '/api/settings'], async (req, res) => {
-  try {
-    const tenantId = req.params.tenantId || req.query.tenantId || req.query.tenant_id;
-    const { data, error } = await supabase.from('tenants').select('*').eq('id', tenantId).single();
-    if (error) throw error;
-    res.json(data || {});
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get('/api/settings', authenticateTenant, async (req, res) => {
+  // req.tenant já vem carregado do middleware, evita nova consulta
+  res.json(req.tenant || {});
 });
 
-app.post(['/api/settings', '/api/settings/:tenantId'], async (req, res) => {
+app.post('/api/settings', authenticateTenant, async (req, res) => {
   try {
-    const tenantId = req.params.tenantId || req.body.tenant_id || req.body.tenantId;
     const updateData = { ...req.body };
     delete updateData.tenant_id;
     delete updateData.tenantId;
+    delete updateData.id; // nunca deixa sobrescrever o próprio ID do tenant
+    delete updateData.user_id;
 
     const { data, error } = await supabase
       .from('tenants')
       .update(updateData)
-      .eq('id', tenantId)
+      .eq('id', req.tenantId)
       .select()
       .single();
 
