@@ -1,4 +1,14 @@
 require('dotenv').config();
+// ---------- Proteção contra crashes globais ----------
+// Evita que um erro não tratado (ex: falha interna do Puppeteer/WhatsApp)
+// derrube o servidor inteiro e afete todas as barbearias conectadas.
+process.on('uncaughtException', (err) => {
+  console.error('❌ [Uncaught Exception] O servidor continua rodando, mas isso precisa ser investigado:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ [Unhandled Rejection] O servidor continua rodando, mas isso precisa ser investigado:', reason);
+});
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
