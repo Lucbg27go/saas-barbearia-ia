@@ -142,7 +142,95 @@ app.get('/api/services', authenticateTenant, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// --- ASSINATURA (ASAAS) ---
+app.post('/api/billing/subscribe', authenticateTenant, async (req, res) => {
+  try {
+    const { cpfCnpj } = req.body;
+    const tenant = req.tenant;
 
+    if (!cpfCnpj && !tenant.cpf_cnpj) {
+      return res.status(400).json({ error: 'CPF ou CNPJ é obrigatório para gerar a assinatura.' });
+    }
+
+    let asaasCustomerId = tenant.asaas_customer_id;
+
+    // Cria o cliente na Asaas só na primeira vez
+    if (!asaasCustomerId) {
+      const customer = await createOrGetCustomer({
+        name: tenant.owner_name || tenant.name,
+        email: tenant.email || req.user.email,
+        cpfCnpj: cpfCnpj || tenant.cpf_cnpj,
+        phone: tenant.phone_number,
+      });
+      asaasCustomerId = customer.id;
+
+      await supabase
+        .from('tenants')
+        .update({ asaas_customer_id: asaasCustomerId, cpf_cnpj: cpfCnpj || tenant.cpf_cnpj })
+        .eq('id', tenant.id);
+    }
+
+    // Alinha a primeira cobrança com o fim do trial (ou hoje, se o trial já passou)
+    const trialEnd = tenant.trial_ends_at ? new Date(tenant.trial_ends_at) : new Date();
+    const firstDueDate = trialEnd > new Date() ? trialEnd : new Date();
+    const nextDueDate = firstDueDate.toISOString().split('T')[0];
+
+    const subscription = await createSubscription({
+      customerId: asaasCustomerId,
+      value: 97.0,
+      nextDueDate,
+      description: `Assinatura BarberAI - ${tenant.name}`,
+    });
+
+    await supabase
+      .from('tenants')
+      .update({ asaas_subscription_id: subscription.id })
+      .eq('id', tenant.id);
+
+    const checkoutUrl = await getFirstPaymentLink(subscription.id);
+
+    res.json({ checkoutUrl, subscriptionId: subscription.id });
+  } catch (err) {
+    console.error('[Asaas Subscribe Error]', err.response?.data || err.message);
+    res.status(500).json({ error: 'Erro ao criar assinatura. Tente novamente.' });
+  }
+});
+
+// Webhook da Asaas — recebe confirmação de pagamento (rota pública, mas valida token)
+app.post('/api/webhooks/asaas', async (req, res) => {
+  try {
+    const receivedToken = req.headers['asaas-access-token'];
+    if (receivedToken !== process.env.ASAAS_WEBHOOK_TOKEN) {
+      return res.status(401).json({ error: 'Token de webhook inválido.' });
+    }
+
+    const { event, payment } = req.body;
+    console.log(`[Asaas Webhook] Evento: ${event}`);
+
+    if (!payment?.subscription) {
+      return res.status(200).json({ received: true });
+    }
+
+    if (event === 'PAYMENT_CONFIRMED' || event === 'PAYMENT_RECEIVED') {
+      await supabase
+        .from('tenants')
+        .update({ subscription_status: 'active' })
+        .eq('asaas_subscription_id', payment.subscription);
+    }
+
+    if (event === 'PAYMENT_OVERDUE' || event === 'PAYMENT_DELETED') {
+      await supabase
+        .from('tenants')
+        .update({ subscription_status: 'overdue' })
+        .eq('asaas_subscription_id', payment.subscription);
+    }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('[Asaas Webhook Error]', err);
+    res.status(500).json({ error: 'Erro ao processar webhook.' });
+  }
+});
 app.post('/api/services', authenticateTenant, async (req, res) => {
   try {
     const { name, price, duration_minutes, duration } = req.body;
