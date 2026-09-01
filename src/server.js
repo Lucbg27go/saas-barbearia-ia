@@ -9,6 +9,7 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('❌ [Unhandled Rejection] O servidor continua rodando, mas isso precisa ser investigado:', reason);
 });
+
 const { createOrGetCustomer, createSubscription, getFirstPaymentLink } = require('./services/asaasService');
 const express = require('express');
 const cors = require('cors');
@@ -142,6 +143,7 @@ app.get('/api/services', authenticateTenant, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // --- ASSINATURA (ASAAS) ---
 app.post('/api/billing/subscribe', authenticateTenant, async (req, res) => {
   try {
@@ -191,7 +193,12 @@ app.post('/api/billing/subscribe', authenticateTenant, async (req, res) => {
 
     res.json({ checkoutUrl, subscriptionId: subscription.id });
   } catch (err) {
-    console.error('[Asaas Subscribe Error]', err.response?.data || err.message);
+    console.error('[Asaas Subscribe Error]', JSON.stringify({
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message,
+      url: err.config?.url,
+    }, null, 2));
     res.status(500).json({ error: 'Erro ao criar assinatura. Tente novamente.' });
   }
 });
@@ -231,6 +238,7 @@ app.post('/api/webhooks/asaas', async (req, res) => {
     res.status(500).json({ error: 'Erro ao processar webhook.' });
   }
 });
+
 app.post('/api/services', authenticateTenant, async (req, res) => {
   try {
     const { name, price, duration_minutes, duration } = req.body;
