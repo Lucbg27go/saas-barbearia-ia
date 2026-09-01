@@ -9,6 +9,7 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('❌ [Unhandled Rejection] O servidor continua rodando, mas isso precisa ser investigado:', reason);
 });
+const { createOrGetCustomer, createSubscription, getFirstPaymentLink } = require('./services/asaasService');
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
