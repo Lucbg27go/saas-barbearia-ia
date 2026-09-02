@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const ASAAS_API_URL = process.env.ASAAS_API_URL || 'https://sandbox.asaas.com/api/v3';
+const ASAAS_API_URL = process.env.ASAAS_API_URL || 'https://api-sandbox.asaas.com/v3';
 const ASAAS_API_KEY = process.env.ASAAS_API_KEY;
 
 const asaasClient = axios.create({
@@ -13,11 +13,14 @@ const asaasClient = axios.create({
 
 // Cria (ou reaproveita) o cliente na Asaas
 async function createOrGetCustomer({ name, email, cpfCnpj, phone }) {
+  const cleanPhone = (phone || '').replace(/\D/g, '');
+  const isValidPhone = cleanPhone.length >= 10;
+
   const { data } = await asaasClient.post('/customers', {
     name,
     email,
     cpfCnpj,
-    mobilePhone: phone || undefined,
+    ...(isValidPhone ? { mobilePhone: cleanPhone } : {}),
   });
   return data; // contém data.id
 }
