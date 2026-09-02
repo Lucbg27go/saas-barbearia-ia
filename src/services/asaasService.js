@@ -12,15 +12,13 @@ const asaasClient = axios.create({
 });
 
 // Cria (ou reaproveita) o cliente na Asaas
-async function createOrGetCustomer({ name, email, cpfCnpj, phone }) {
-  const cleanPhone = (phone || '').replace(/\D/g, '');
-  const isValidPhone = cleanPhone.length >= 10;
-
+// Telefone não é enviado por enquanto (não é coletado no cadastro ainda),
+// evitando erros de validação de formato por parte da Asaas.
+async function createOrGetCustomer({ name, email, cpfCnpj }) {
   const { data } = await asaasClient.post('/customers', {
     name,
     email,
     cpfCnpj,
-    ...(isValidPhone ? { mobilePhone: cleanPhone } : {}),
   });
   return data; // contém data.id
 }
