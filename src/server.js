@@ -270,6 +270,139 @@ app.delete('/api/services/:id', authenticateTenant, async (req, res) => {
   }
 });
 
+// --- BARBEIROS ---
+app.get('/api/barbers', authenticateTenant, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('barbers')
+      .select('*')
+      .eq('tenant_id', req.tenantId)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/barbers', authenticateTenant, async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Nome do barbeiro é obrigatório.' });
+    }
+    const { data, error } = await supabase
+      .from('barbers')
+      .insert([{ tenant_id: req.tenantId, name: name.trim() }])
+      .select()
+      .single();
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/barbers/:id', authenticateTenant, async (req, res) => {
+  try {
+    const { name, is_active } = req.body;
+    const updateData = {};
+    if (name !== undefined) updateData.name = name.trim();
+    if (is_active !== undefined) updateData.is_active = is_active;
+
+    const { data, error } = await supabase
+      .from('barbers')
+      .update(updateData)
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId) // garante isolamento por tenant
+      .select()
+      .single();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/barbers/:id', authenticateTenant, async (req, res) => {
+  try {
+    // Impede excluir barbeiro que já tem agendamento (evita quebrar histórico)
+    const { count } = await supabase
+      .from('appointments')
+      .select('id', { count: 'exact', head: true })
+      .eq('barber_id', req.params.id);
+
+    if (count > 0) {
+      return res.status(409).json({
+        error: 'Este barbeiro já possui agendamentos e não pode ser excluído. Desative-o em vez disso.'
+      });
+    }
+
+    const { error } = await supabase
+      .from('barbers')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- HORÁRIO DE TRABALHO POR BARBEIRO ---
+app.get('/api/barbers/:id/working-hours', authenticateTenant, async (req, res) => {
+  try {
+    const { data: barber } = await supabase
+      .from('barbers')
+      .select('id')
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId)
+      .single();
+    if (!barber) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+
+    const { data, error } = await supabase
+      .from('working_hours')
+      .select('*')
+      .eq('barber_id', req.params.id)
+      .order('day_of_week', { ascending: true });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Substitui o horário completo do barbeiro de uma vez (upsert por dia da semana)
+app.put('/api/barbers/:id/working-hours', authenticateTenant, async (req, res) => {
+  try {
+    const { data: barber } = await supabase
+      .from('barbers')
+      .select('id')
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId)
+      .single();
+    if (!barber) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+
+    const { days } = req.body; // array: [{ day_of_week, is_open, open_time, close_time, lunch_start, lunch_end }]
+    if (!Array.isArray(days)) {
+      return res.status(400).json({ error: 'Formato inválido: "days" deve ser um array.' });
+    }
+
+    const rows = days.map((d) => ({ ...d, barber_id: req.params.id }));
+
+    const { data, error } = await supabase
+      .from('working_hours')
+      .upsert(rows, { onConflict: 'barber_id,day_of_week' })
+      .select();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- AGENDAMENTOS ---
 app.get('/api/appointments', authenticateTenant, async (req, res) => {
   try {
