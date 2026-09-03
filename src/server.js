@@ -390,7 +390,7 @@ app.put('/api/barbers/:id/working-hours', authenticateTenant, async (req, res) =
       return res.status(400).json({ error: 'Formato inválido: "days" deve ser um array.' });
     }
 
-    const rows = days.map((d) => ({ ...d, barber_id: req.params.id }));
+    const rows = days.map((d) => ({ ...d, barber_id: req.params.id, tenant_id: req.tenantId }));
 
     const { data, error } = await supabase
       .from('working_hours')
