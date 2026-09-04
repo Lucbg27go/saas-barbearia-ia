@@ -449,3 +449,96 @@ app.post('/api/settings', authenticateTenant, async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Servidor rodando com sucesso na porta ${PORT}`);
 });
+
+// --- ÁREA PÚBLICA (sem autenticação — usada pela página de agendamento do cliente final) ---
+
+app.get('/api/public/:tenantId/services', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('services')
+      .select('id, name, price, duration_minutes')
+      .eq('tenant_id', req.params.tenantId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/public/:tenantId/barbers', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('barbers')
+      .select('id, name')
+      .eq('tenant_id', req.params.tenantId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/public/:tenantId/availability', async (req, res) => {
+  try {
+    const { barberId, serviceId, date } = req.query;
+    if (!barberId || !serviceId || !date) {
+      return res.status(400).json({ error: 'Parâmetros barberId, serviceId e date são obrigatórios.' });
+    }
+    const slots = await getAvailableSlots({ tenantId: req.params.tenantId, barberId, serviceId, date });
+    res.json({ slots });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/public/:tenantId/appointments', async (req, res) => {
+  try {
+    const { barberId, serviceId, date, time, customerName, customerPhone } = req.body;
+    if (!barberId || !serviceId || !date || !time || !customerName || !customerPhone) {
+      return res.status(400).json({ error: 'Todos os campos são obrigatórios.' });
+    }
+
+    const { data: service, error: serviceErr } = await supabase
+      .from('services')
+      .select('duration_minutes, price')
+      .eq('id', serviceId)
+      .eq('tenant_id', req.params.tenantId)
+      .single();
+    if (serviceErr || !service) return res.status(404).json({ error: 'Serviço não encontrado.' });
+
+    // Revalida a disponibilidade no momento exato da criação —
+    // evita dois clientes marcando o mesmo horário ao mesmo tempo.
+    const slots = await getAvailableSlots({ tenantId: req.params.tenantId, barberId, serviceId, date });
+    if (!slots.includes(time)) {
+      return res.status(409).json({ error: 'Esse horário acabou de ser preenchido. Escolha outro, por favor.' });
+    }
+
+    const startTime = new Date(`${date}T${time}:00`);
+    const endTime = new Date(startTime.getTime() + service.duration_minutes * 60000);
+
+    const { data, error } = await supabase
+      .from('appointments')
+      .insert([{
+        tenant_id: req.params.tenantId,
+        barber_id: barberId,
+        service_id: serviceId,
+        customer_name: customerName,
+        customer_phone: customerPhone,
+        start_time: startTime.toISOString(),
+        end_time: endTime.toISOString(),
+        price: service.price,
+        status: 'CONFIRMED',
+      }])
+      .select()
+      .single();
+    if (error) throw error;
+
+    res.status(201).json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
