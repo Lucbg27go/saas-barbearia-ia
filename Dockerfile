@@ -1,5 +1,10 @@
 FROM node:22-slim
 
+FROM node:22-slim
+
+# cache-bust: força o Railway a rebuildar do zero (mudar esse número quando precisar)
+ARG CACHE_BUST=1
+
 # Instala dependências do Chromium para o whatsapp-web.js
 RUN apt-get update && apt-get install -y \
     gconf-service \
